@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 import chromadb
-import fitz  # pymupdf
 from chromadb.config import Settings
 from fastembed import TextEmbedding
 from rich.console import Console
@@ -18,6 +17,7 @@ from rich.progress import (
 from rich.table import Table
 
 from engram.config import load as load_config
+from engram.readers import SUPPORTED_EXTENSIONS, read_file
 from engram.storage import (
     DB_DIR,
     clear_session,
@@ -71,10 +71,22 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
-def default_project(pdf_path: Path) -> str:
-    """Derive a project name from the PDF's parent directory."""
-    parent = pdf_path.resolve().parent.name
+def default_project(file_path: Path) -> str:
+    """Derive a project name from the file's parent directory."""
+    parent = file_path.resolve().parent.name
     return parent if parent else "default"
+
+
+def expand_paths(paths: list[Path]) -> list[Path]:
+    """Expand directories to all supported files within them."""
+    result = []
+    for path in paths:
+        if path.is_dir():
+            for ext in sorted(SUPPORTED_EXTENSIONS):
+                result.extend(sorted(path.rglob(f"*{ext}")))
+        else:
+            result.append(path)
+    return result
 
 
 def _build_where(
@@ -101,7 +113,7 @@ def _build_where(
 
 
 def cmd_index(
-    pdf_paths: list[Path],
+    paths: list[Path],
     force: bool = False,
     copy: bool | None = None,
     store: bool = True,
@@ -121,19 +133,23 @@ def cmd_index(
     collection = get_collection()
     model = load_model()
 
-    for pdf_path in pdf_paths:
-        if not pdf_path.exists():
-            console.print(f"[yellow][skip][/yellow] not found: {pdf_path}")
+    for file_path in expand_paths(paths):
+        if not file_path.exists():
+            console.print(f"[yellow][skip][/yellow] not found: {file_path}")
             continue
 
-        proj = project or default_project(pdf_path)
-        prefix = doc_id_prefix(pdf_path)
-        existing = collection.get(where={"source": str(pdf_path.resolve())})
+        if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            console.print(f"[yellow][skip][/yellow] unsupported type: {file_path.name}")
+            continue
+
+        proj = project or default_project(file_path)
+        prefix = doc_id_prefix(file_path)
+        existing = collection.get(where={"source": str(file_path.resolve())})
 
         if existing["ids"] and not force:
             console.print(
                 f"[yellow][skip][/yellow] already indexed "
-                f"({len(existing['ids'])} chunks): {pdf_path.name}"
+                f"({len(existing['ids'])} chunks): {file_path.name}"
             )
             console.print("       Use [bold]--force[/bold] to re-index.")
             continue
@@ -142,39 +158,40 @@ def cmd_index(
             collection.delete(ids=existing["ids"])
             console.print(
                 f"[dim][re-index] removed {len(existing['ids'])} old chunks "
-                f"for {pdf_path.name}[/dim]"
+                f"for {file_path.name}[/dim]"
             )
 
         if store:
-            stored_path = store_file(pdf_path, copy=copy)
+            stored_path = store_file(file_path, copy=copy)
             action = "copied" if copy else "linked"
             console.print(f"[dim]File {action} → {stored_path}[/dim]")
 
-        doc = fitz.open(str(pdf_path))
-        total_pages = len(doc)
+        try:
+            sections = read_file(file_path)
+        except Exception as exc:
+            console.print(f"[red][error][/red] Could not read {file_path.name}: {exc}")
+            continue
+
+        total_sections = sections[0].total if sections else 0
         console.print(
-            f"Indexing [bold]{pdf_path.name}[/bold] ({total_pages} pages) "
+            f"Indexing [bold]{file_path.name}[/bold] ({total_sections} sections) "
             f"→ project [cyan]{proj}[/cyan]"
         )
 
         try:
             chunk_texts, chunk_metas = [], []
-            for page_num in range(total_pages):
-                page = doc[page_num]
-                text = page.get_text().strip()
-                if len(text) < MIN_CHARS:
+            for section in sections:
+                if len(section.text) < MIN_CHARS:
                     continue
-                phys_page = page_num + 1
-                doc_label = page.get_label() or str(phys_page)
-                for chunk_idx, chunk in enumerate(chunk_text(text)):
+                for chunk_idx, chunk in enumerate(chunk_text(section.text)):
                     chunk_texts.append(chunk)
                     chunk_metas.append(
                         {
-                            "source": str(pdf_path.resolve()),
-                            "filename": pdf_path.name,
-                            "page": phys_page,
-                            "page_label": doc_label,
-                            "total_pages": total_pages,
+                            "source": str(file_path.resolve()),
+                            "filename": file_path.name,
+                            "page": section.phys_page,
+                            "page_label": section.page_label,
+                            "total_pages": section.total,
                             "chunk": chunk_idx,
                             "project": proj,
                         }
@@ -199,21 +216,20 @@ def cmd_index(
                     progress.advance(task)
 
         except KeyboardInterrupt:
-            doc.close()
             console.print(
-                f"\n[red][interrupted][/red] Cleaning up partial index for {pdf_path.name}..."
+                f"\n[red][interrupted][/red] Cleaning up partial index for {file_path.name}..."
             )
-            partial = collection.get(where={"source": str(pdf_path.resolve())})
+            partial = collection.get(where={"source": str(file_path.resolve())})
             if partial["ids"]:
                 collection.delete(ids=partial["ids"])
             console.print("[red][interrupted][/red] No partial data left. Re-run to index.")
             raise SystemExit(1)
 
-        indexed_pages = len({m["page"] for m in metadatas})
+        indexed = len({m["page"] for m in metadatas})
         console.print(
             f"  → [green]{len(ids)} chunks[/green] from "
-            f"{indexed_pages}/{total_pages} pages "
-            f"(skipped {total_pages - indexed_pages} near-blank)"
+            f"{indexed}/{total_sections} sections "
+            f"(skipped {total_sections - indexed} near-blank)"
         )
 
         if ids:
@@ -225,8 +241,6 @@ def cmd_index(
                     documents=documents[i : i + batch],
                     metadatas=metadatas[i : i + batch],
                 )
-
-        doc.close()
 
     total = collection.count()
     console.print(f"\nKnowledge base: [bold]{total} chunks[/bold] total.")

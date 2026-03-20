@@ -12,6 +12,10 @@ dependencies = [
     "fastembed",
     "rich",
     "platformdirs",
+    "beautifulsoup4",
+    "python-docx",
+    "python-pptx",
+    "ebooklib",
 ]
 
 [project.scripts]

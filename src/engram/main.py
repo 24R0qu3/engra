@@ -38,8 +38,14 @@ def run() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # index
-    p_index = sub.add_parser("index", help="Index one or more PDF files")
-    p_index.add_argument("pdfs", nargs="+", type=Path)
+    p_index = sub.add_parser("index", help="Index files or directories")
+    p_index.add_argument(
+        "files",
+        nargs="+",
+        type=Path,
+        metavar="FILE_OR_DIR",
+        help="Files or directories (pdf, txt, md, rst, html, docx, pptx, epub)",
+    )
     p_index.add_argument("--force", action="store_true", help="Re-index even if already present")
     p_index.add_argument("--project", default=None, help="Project name (default: parent dir name)")
     store_group = p_index.add_mutually_exclusive_group()
@@ -102,7 +108,7 @@ def run() -> None:
     if args.cmd == "index":
         copy = False if args.link else None
         cmd_index(
-            args.pdfs,
+            args.files,
             force=args.force,
             copy=copy,
             store=not args.no_store,

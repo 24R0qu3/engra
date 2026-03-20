@@ -5,9 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from engram.commands import CHUNK_OVERLAP, CHUNK_SIZE, chunk_text, default_project
+from engram.commands import CHUNK_OVERLAP, CHUNK_SIZE, chunk_text, default_project, expand_paths
 from engram.config import _DEFAULT_TOML, DEFAULTS
 from engram.log import setup
+from engram.readers import SUPPORTED_EXTENSIONS, read_markdown, read_rst, read_text
 from engram.storage import clear_session, read_session, write_session
 
 # ── chunk_text ────────────────────────────────────────────────────────────────
@@ -276,3 +277,94 @@ def test_session_expiry(patched_state, monkeypatch):
 
     assert read_session() == []
     assert not patched_state.exists()  # expired file removed
+
+
+# ── readers ───────────────────────────────────────────────────────────────────
+
+
+def test_supported_extensions_includes_common_types():
+    for ext in [".pdf", ".txt", ".md", ".rst", ".html", ".docx", ".pptx", ".epub"]:
+        assert ext in SUPPORTED_EXTENSIONS
+
+
+def test_read_text_single_section(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("Hello world\nThis is a test.")
+    sections = read_text(f)
+    assert len(sections) == 1
+    assert sections[0].phys_page == 1
+    assert sections[0].total == 1
+    assert "Hello world" in sections[0].text
+
+
+def test_read_markdown_splits_by_headings(tmp_path):
+    f = tmp_path / "doc.md"
+    f.write_text("# Introduction\nSome intro text.\n\n## Methods\nSome methods.")
+    sections = read_markdown(f)
+    assert len(sections) == 2
+    assert sections[0].page_label == "Introduction"
+    assert sections[1].page_label == "Methods"
+
+
+def test_read_markdown_no_headings_fallback(tmp_path):
+    f = tmp_path / "doc.md"
+    f.write_text("Just plain text with no headings.")
+    sections = read_markdown(f)
+    assert len(sections) == 1
+
+
+def test_read_markdown_section_numbering(tmp_path):
+    f = tmp_path / "doc.md"
+    f.write_text("# A\ntext\n# B\ntext\n# C\ntext")
+    sections = read_markdown(f)
+    assert [s.phys_page for s in sections] == [1, 2, 3]
+    assert all(s.total == 3 for s in sections)
+
+
+def test_read_rst_splits_by_sections(tmp_path):
+    f = tmp_path / "doc.rst"
+    f.write_text("Introduction\n============\nSome intro.\n\nMethods\n-------\nSome methods.")
+    sections = read_rst(f)
+    assert len(sections) >= 1
+    assert any("Introduction" in s.page_label for s in sections)
+
+
+def test_read_markdown_label_truncated(tmp_path):
+    f = tmp_path / "doc.md"
+    long_heading = "# " + "A" * 100
+    f.write_text(long_heading + "\ntext")
+    sections = read_markdown(f)
+    assert len(sections[0].page_label) <= 60
+
+
+# ── expand_paths ──────────────────────────────────────────────────────────────
+
+
+def test_expand_paths_passthrough_files(tmp_path):
+    f = tmp_path / "doc.pdf"
+    f.touch()
+    result = expand_paths([f])
+    assert result == [f]
+
+
+def test_expand_paths_expands_directory(tmp_path):
+    (tmp_path / "a.pdf").touch()
+    (tmp_path / "b.txt").touch()
+    (tmp_path / "c.jpg").touch()  # unsupported — included by glob but filtered later
+    result = expand_paths([tmp_path])
+    names = {p.name for p in result}
+    assert "a.pdf" in names
+    assert "b.txt" in names
+    assert "c.jpg" not in names  # not in SUPPORTED_EXTENSIONS so not returned
+
+
+def test_expand_paths_mixed(tmp_path):
+    d = tmp_path / "subdir"
+    d.mkdir()
+    (d / "nested.md").touch()
+    single = tmp_path / "top.txt"
+    single.touch()
+    result = expand_paths([single, d])
+    names = {p.name for p in result}
+    assert "top.txt" in names
+    assert "nested.md" in names
