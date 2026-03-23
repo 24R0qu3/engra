@@ -252,6 +252,7 @@ def cmd_search(
     min_score: float = 0.0,
     filename: str | None = None,
     project: str | None = None,
+    full: bool = False,
 ) -> None:
     collection = get_collection()
     if collection.count() == 0:
@@ -306,9 +307,11 @@ def cmd_search(
         phys_info = f"  (phys. {meta['page']})" if doc_label != str(meta["page"]) else ""
         proj_info = f"  [dim][{meta.get('project', '')}][/dim]" if not active_projects else ""
 
-        snippet = " ".join(text.split())[:220]
-        if len(" ".join(text.split())) > 220:
-            snippet += "…"
+        if full:
+            snippet = " ".join(text.split())
+        else:
+            normalized = " ".join(text.split())
+            snippet = normalized[:220] + ("…" if len(normalized) > 220 else "")
 
         console.print(
             f"[bold cyan][{shown}][/bold cyan] {meta['filename']}{proj_info}  —  "
@@ -323,6 +326,87 @@ def cmd_search(
         if active_projects:
             msg += f" (searching in: {', '.join(active_projects)})"
         console.print(f"[yellow]{msg}[/yellow]")
+
+
+def parse_page_range(page_arg: str) -> tuple[int, int]:
+    """Parse a page argument into an inclusive (start, end) range.
+
+    Accepts "42" (single page) or "42-59" (range).
+    Raises ValueError for invalid input or reversed ranges.
+    """
+    if "-" in page_arg:
+        raw_start, _, raw_end = page_arg.partition("-")
+        try:
+            start, end = int(raw_start), int(raw_end)
+        except ValueError:
+            raise ValueError(f"invalid page range {page_arg!r} — expected PAGE or PAGE-PAGE")
+    else:
+        try:
+            start = end = int(page_arg)
+        except ValueError:
+            raise ValueError(f"invalid page {page_arg!r} — expected an integer")
+    if start > end:
+        raise ValueError("start page must be less than or equal to end page")
+    return start, end
+
+
+def _format_missing_pages(pages: list[int]) -> str:
+    """Format a sorted list of page numbers as a compact range string."""
+    if not pages:
+        return ""
+    groups: list[str] = []
+    seg_start = seg_end = pages[0]
+    for p in pages[1:]:
+        if p == seg_end + 1:
+            seg_end = p
+        else:
+            groups.append(f"{seg_start}-{seg_end}" if seg_start != seg_end else str(seg_start))
+            seg_start = seg_end = p
+    groups.append(f"{seg_start}-{seg_end}" if seg_start != seg_end else str(seg_start))
+    return ", ".join(groups)
+
+
+def cmd_get(filename: str, page_start: int, page_end: int, chunk: int | None = None) -> None:
+    """Retrieve full chunk text from the index by filename and page range."""
+    col = get_collection()
+    all_pairs: list[tuple[dict, str]] = []
+    missing_pages: list[int] = []
+
+    for page in range(page_start, page_end + 1):
+        clauses: list[dict] = [{"filename": filename}, {"page": page}]
+        if chunk is not None:
+            clauses.append({"chunk": chunk})
+        results = col.get(where={"$and": clauses}, include=["documents", "metadatas"])
+        docs: list[str] = results.get("documents") or []
+        metas: list[dict] = results.get("metadatas") or []
+        if not docs:
+            missing_pages.append(page)
+            continue
+        all_pairs.extend(sorted(zip(metas, docs), key=lambda x: (x[0].get("page", page), x[0].get("chunk", 0))))
+
+    if not all_pairs:
+        if page_start == page_end:
+            msg = f"[yellow]No chunks found for[/yellow] {filename!r} page {page_start}"
+            if chunk is not None:
+                msg += f" chunk {chunk}"
+        else:
+            msg = f"[yellow]No chunks found for[/yellow] {filename!r} pages {page_start}-{page_end}"
+        console.print(msg)
+        return
+
+    for meta, text in all_pairs:
+        pg = meta.get("page", page_start)
+        label = meta.get("page_label", str(pg))
+        chunk_idx = meta.get("chunk", 0)
+        source = meta.get("source", "")
+        console.print(f"[bold cyan]{filename}[/bold cyan]  p.{label}  chunk {chunk_idx}")
+        if source:
+            console.print(f"[dim]{source}[/dim]")
+        console.print(text)
+        console.print()
+
+    if missing_pages:
+        console.print(f"[yellow]pages {_format_missing_pages(missing_pages)} not found in index[/yellow]")
 
 
 def cmd_list() -> None:

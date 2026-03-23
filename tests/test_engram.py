@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from engram.commands import CHUNK_OVERLAP, CHUNK_SIZE, chunk_text, default_project, expand_paths
+from engram.commands import (
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    _format_missing_pages,
+    chunk_text,
+    default_project,
+    expand_paths,
+    parse_page_range,
+)
 from engram.config import _DEFAULT_TOML, DEFAULTS
 from engram.log import setup
 from engram.readers import SUPPORTED_EXTENSIONS, read_markdown, read_rst, read_text
@@ -335,6 +343,59 @@ def test_read_markdown_label_truncated(tmp_path):
     f.write_text(long_heading + "\ntext")
     sections = read_markdown(f)
     assert len(sections[0].page_label) <= 60
+
+
+# ── parse_page_range ──────────────────────────────────────────────────────────
+
+
+def test_parse_page_range_single():
+    assert parse_page_range("42") == (42, 42)
+
+
+def test_parse_page_range_range():
+    assert parse_page_range("5-10") == (5, 10)
+
+
+def test_parse_page_range_degenerate():
+    assert parse_page_range("7-7") == (7, 7)
+
+
+def test_parse_page_range_reversed():
+    with pytest.raises(ValueError, match="less than or equal"):
+        parse_page_range("10-5")
+
+
+def test_parse_page_range_invalid_string():
+    with pytest.raises(ValueError):
+        parse_page_range("abc")
+
+
+def test_parse_page_range_invalid_range_string():
+    with pytest.raises(ValueError):
+        parse_page_range("a-b")
+
+
+# ── _format_missing_pages ─────────────────────────────────────────────────────
+
+
+def test_format_missing_pages_empty():
+    assert _format_missing_pages([]) == ""
+
+
+def test_format_missing_pages_single():
+    assert _format_missing_pages([5]) == "5"
+
+
+def test_format_missing_pages_consecutive():
+    assert _format_missing_pages([5, 6, 7]) == "5-7"
+
+
+def test_format_missing_pages_non_consecutive():
+    assert _format_missing_pages([5, 7, 9]) == "5, 7, 9"
+
+
+def test_format_missing_pages_mixed():
+    assert _format_missing_pages([3, 4, 7, 10, 11, 12]) == "3-4, 7, 10-12"
 
 
 # ── expand_paths ──────────────────────────────────────────────────────────────

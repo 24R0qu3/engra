@@ -4,8 +4,10 @@ from pathlib import Path
 
 from engram import __version__
 from engram.commands import (
+    cmd_get,
     cmd_index,
     cmd_list,
+    parse_page_range,
     cmd_project_activate,
     cmd_project_active,
     cmd_project_deactivate,
@@ -71,6 +73,23 @@ def run() -> None:
         action="store_true",
         help="Search globally, ignoring active session",
     )
+    p_search.add_argument(
+        "--full",
+        action="store_true",
+        help="Show complete chunk text instead of a short snippet",
+    )
+
+    # get
+    p_get = sub.add_parser("get", help="Retrieve full chunk text by file and page")
+    p_get.add_argument("filename", metavar="FILENAME")
+    p_get.add_argument("page", metavar="PAGE_OR_RANGE", help="Page number or range (e.g. 5 or 5-10)")
+    p_get.add_argument(
+        "--chunk",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Retrieve a specific chunk index (default: all chunks on the page)",
+    )
 
     # list
     sub.add_parser("list", help="List indexed documents")
@@ -121,7 +140,16 @@ def run() -> None:
             min_score=args.min_score,
             filename=args.file,
             project=args.project if not args.search_all else None,
+            full=args.full,
         )
+    elif args.cmd == "get":
+        try:
+            page_start, page_end = parse_page_range(args.page)
+        except ValueError as exc:
+            p_get.error(str(exc))
+        if page_start != page_end and args.chunk is not None:
+            p_get.error("--chunk is not allowed with a page range")
+        cmd_get(args.filename, page_start, page_end, chunk=args.chunk)
     elif args.cmd == "list":
         cmd_list()
     elif args.cmd == "remove":
