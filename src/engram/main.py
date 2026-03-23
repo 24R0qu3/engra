@@ -71,7 +71,12 @@ def run() -> None:
     )
     p_search.add_argument("--file", metavar="FILENAME", help="Restrict search to a specific file")
     p_search.add_argument(
-        "--project", default=None, help="Search in this project (overrides session)"
+        "--project",
+        action="append",
+        metavar="PROJECT",
+        dest="projects",
+        default=None,
+        help="Search in this project (repeatable; overrides session)",
     )
     p_search.add_argument(
         "--all",
@@ -178,7 +183,7 @@ def run() -> None:
             top_k=args.top,
             min_score=args.min_score,
             filename=args.file,
-            project=args.project if not args.search_all else None,
+            projects=args.projects if not args.search_all else None,
             full=args.full,
         )
     elif args.cmd == "get":

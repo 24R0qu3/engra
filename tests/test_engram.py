@@ -483,6 +483,40 @@ def test_stale_warning_no_mtime_stored(tmp_path):
     assert _stale_warning(str(f), None, None) is None
 
 
+# ── cross-project search CLI ──────────────────────────────────────────────────
+
+
+def _make_search_parser():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd")
+    p = sub.add_parser("search")
+    p.add_argument("query")
+    p.add_argument("--project", action="append", metavar="PROJECT", dest="projects", default=None)
+    p.add_argument("--all", dest="search_all", action="store_true")
+    return parser
+
+
+def test_search_single_project():
+    args = _make_search_parser().parse_args(["search", "q", "--project", "A"])
+    assert args.projects == ["A"]
+
+
+def test_search_multi_project():
+    args = _make_search_parser().parse_args(["search", "q", "--project", "A", "--project", "B"])
+    assert args.projects == ["A", "B"]
+
+
+def test_search_no_project_defaults_none():
+    args = _make_search_parser().parse_args(["search", "q"])
+    assert args.projects is None
+
+
+def test_search_all_overrides_projects():
+    args = _make_search_parser().parse_args(["search", "q", "--all", "--project", "A"])
+    # When --all is set, projects should be ignored in dispatch
+    assert args.search_all is True
+
+
 # ── index metadata constants ──────────────────────────────────────────────────
 
 

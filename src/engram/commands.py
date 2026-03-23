@@ -328,7 +328,7 @@ def cmd_search(
     top_k: int = 5,
     min_score: float = 0.0,
     filename: str | None = None,
-    project: str | None = None,
+    projects: list[str] | None = None,
     full: bool = False,
 ) -> None:
     collection = get_collection()
@@ -338,9 +338,9 @@ def cmd_search(
         )
         return
 
-    # Resolve active projects: explicit flag overrides session
-    if project:
-        active_projects = [project]
+    # Resolve active projects: explicit flag(s) override session
+    if projects:
+        active_projects = projects
     else:
         active_projects = read_session()
 
@@ -370,6 +370,10 @@ def cmd_search(
     console.print(f'\nResults for: [bold]"{query}"[/bold]')
     console.rule()
 
+    # Show project prefix when multiple projects are in scope (or global search with mixed results)
+    result_projects = {m.get("project", "") for m in metas}
+    show_project = len(active_projects) != 1 and len(result_projects) > 1
+
     shown = 0
     for text, meta, dist in zip(docs, metas, distances):
         score = 1.0 - dist
@@ -383,7 +387,10 @@ def cmd_search(
         page_str = doc_label if doc_label != str(meta["page"]) else str(meta["page"])
         chunk_info = f"  chunk {meta['chunk']}" if meta.get("chunk", 0) > 0 else ""
         phys_info = f"  (phys. {meta['page']})" if doc_label != str(meta["page"]) else ""
-        proj_info = f"  [dim][{meta.get('project', '')}][/dim]" if not active_projects else ""
+        if show_project:
+            file_label = f"[dim]{meta.get('project', '')}[/dim] › {meta['filename']}"
+        else:
+            file_label = meta["filename"]
 
         if full:
             snippet = " ".join(text.split())
@@ -392,7 +399,7 @@ def cmd_search(
             snippet = normalized[:220] + ("…" if len(normalized) > 220 else "")
 
         console.print(
-            f"[bold cyan][{shown}][/bold cyan] {meta['filename']}{proj_info}  —  "
+            f"[bold cyan][{shown}][/bold cyan] {file_label}  —  "
             f"p.{page_str}/{meta['total_pages']}{chunk_info}{phys_info}  "
             f"[dim](score: {score:.3f})[/dim]"
         )
