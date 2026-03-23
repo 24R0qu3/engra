@@ -90,6 +90,25 @@ def run() -> None:
         metavar="N",
         help="Retrieve a specific chunk index (default: all chunks on the page)",
     )
+    nav_group = p_get.add_mutually_exclusive_group()
+    nav_group.add_argument(
+        "--next",
+        type=int,
+        nargs="?",
+        const=1,
+        default=None,
+        metavar="K",
+        help="Show K chunks after the specified position (default K=1)",
+    )
+    nav_group.add_argument(
+        "--prev",
+        type=int,
+        nargs="?",
+        const=1,
+        default=None,
+        metavar="K",
+        help="Show K chunks before the specified position (default K=1)",
+    )
 
     # list
     sub.add_parser("list", help="List indexed documents")
@@ -149,7 +168,9 @@ def run() -> None:
             p_get.error(str(exc))
         if page_start != page_end and args.chunk is not None:
             p_get.error("--chunk is not allowed with a page range")
-        cmd_get(args.filename, page_start, page_end, chunk=args.chunk)
+        if page_start != page_end and (args.next is not None or args.prev is not None):
+            p_get.error("--next/--prev are not allowed with a page range")
+        cmd_get(args.filename, page_start, page_end, chunk=args.chunk, next_k=args.next, prev_k=args.prev)
     elif args.cmd == "list":
         cmd_list()
     elif args.cmd == "remove":

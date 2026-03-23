@@ -366,9 +366,109 @@ def _format_missing_pages(pages: list[int]) -> str:
     return ", ".join(groups)
 
 
-def cmd_get(filename: str, page_start: int, page_end: int, chunk: int | None = None) -> None:
+def _get_chunk_sequence(col, filename: str) -> list[tuple[int, int, str]]:
+    """Return sorted (page, chunk_idx, page_label) tuples for every chunk of a file."""
+    results = col.get(where={"filename": filename}, include=["metadatas"])
+    metas: list[dict] = results.get("metadatas") or []
+    seen: set[tuple[int, int]] = set()
+    items: list[tuple[int, int, str]] = []
+    for m in metas:
+        key = (m.get("page", 0), m.get("chunk", 0))
+        if key not in seen:
+            seen.add(key)
+            items.append((m["page"], m.get("chunk", 0), m.get("page_label", str(m["page"]))))
+    return sorted(items, key=lambda x: (x[0], x[1]))
+
+
+def _find_seq_index(sequence: list[tuple[int, int, str]], page: int, chunk: int) -> int | None:
+    """Return the index of (page, chunk) in sequence, or None if not found."""
+    for i, (p, c, _) in enumerate(sequence):
+        if p == page and c == chunk:
+            return i
+    return None
+
+
+def _print_nav_hint(filename: str, sequence: list[tuple[int, int, str]], first_idx: int, last_idx: int) -> None:
+    """Print ← prev / next → navigation hint based on displayed range."""
+    if first_idx > 0:
+        pp, pc, _ = sequence[first_idx - 1]
+        prev_line = f"[dim]← prev: engram get {filename} {pp} --chunk {pc}[/dim]"
+    else:
+        prev_line = "[dim]← (start of document)[/dim]"
+
+    if last_idx < len(sequence) - 1:
+        np_, nc, _ = sequence[last_idx + 1]
+        next_line = f"[dim]   next: engram get {filename} {np_} --chunk {nc} →[/dim]"
+    else:
+        next_line = "[dim]   (end of document) →[/dim]"
+
+    console.print(prev_line)
+    console.print(next_line)
+
+
+def _print_chunk(filename: str, meta: dict, text: str) -> None:
+    pg = meta.get("page", 0)
+    label = meta.get("page_label", str(pg))
+    chunk_idx = meta.get("chunk", 0)
+    console.print(f"[bold cyan]{filename}[/bold cyan]  p.{label}  chunk {chunk_idx}")
+    if meta.get("source"):
+        console.print(f"[dim]{meta['source']}[/dim]")
+    console.print(text)
+    console.print()
+
+
+def cmd_get(
+    filename: str,
+    page_start: int,
+    page_end: int,
+    chunk: int | None = None,
+    next_k: int | None = None,
+    prev_k: int | None = None,
+) -> None:
     """Retrieve full chunk text from the index by filename and page range."""
     col = get_collection()
+    sequence = _get_chunk_sequence(col, filename)
+    single_page = page_start == page_end
+    nav_mode = next_k is not None or prev_k is not None
+
+    if nav_mode:
+        # Find reference (page, chunk) position in sequence
+        ref_page = page_start  # ranges disallowed with nav in main.py
+        if chunk is None:
+            page_seq_idxs = [i for i, (p, _, _) in enumerate(sequence) if p == ref_page]
+            if not page_seq_idxs:
+                console.print(f"[yellow]No chunks found for[/yellow] {filename!r} page {ref_page}")
+                return
+            ref_idx = page_seq_idxs[-1] if next_k is not None else page_seq_idxs[0]
+        else:
+            ref_idx = _find_seq_index(sequence, ref_page, chunk)
+            if ref_idx is None:
+                console.print(f"[yellow]Chunk not found:[/yellow] {filename!r} page {ref_page} chunk {chunk}")
+                return
+
+        if next_k is not None:
+            target = range(ref_idx + 1, min(ref_idx + 1 + next_k, len(sequence)))
+        else:
+            target = range(max(0, ref_idx - prev_k), ref_idx)
+
+        if not target:
+            edge = "end" if next_k is not None else "beginning"
+            console.print(f"[yellow]Already at the {edge} of {filename!r}[/yellow]")
+            return
+
+        for seq_idx in target:
+            tp, tc, _ = sequence[seq_idx]
+            r = col.get(
+                where={"$and": [{"filename": filename}, {"page": tp}, {"chunk": tc}]},
+                include=["documents", "metadatas"],
+            )
+            for meta, text in zip(r.get("metadatas") or [], r.get("documents") or []):
+                _print_chunk(filename, meta, text)
+
+        _print_nav_hint(filename, sequence, target.start, target.stop - 1)
+        return
+
+    # Normal mode: fetch page range
     all_pairs: list[tuple[dict, str]] = []
     missing_pages: list[int] = []
 
@@ -382,10 +482,12 @@ def cmd_get(filename: str, page_start: int, page_end: int, chunk: int | None = N
         if not docs:
             missing_pages.append(page)
             continue
-        all_pairs.extend(sorted(zip(metas, docs), key=lambda x: (x[0].get("page", page), x[0].get("chunk", 0))))
+        all_pairs.extend(
+            sorted(zip(metas, docs), key=lambda x: (x[0].get("page", page), x[0].get("chunk", 0)))
+        )
 
     if not all_pairs:
-        if page_start == page_end:
+        if single_page:
             msg = f"[yellow]No chunks found for[/yellow] {filename!r} page {page_start}"
             if chunk is not None:
                 msg += f" chunk {chunk}"
@@ -395,18 +497,18 @@ def cmd_get(filename: str, page_start: int, page_end: int, chunk: int | None = N
         return
 
     for meta, text in all_pairs:
-        pg = meta.get("page", page_start)
-        label = meta.get("page_label", str(pg))
-        chunk_idx = meta.get("chunk", 0)
-        source = meta.get("source", "")
-        console.print(f"[bold cyan]{filename}[/bold cyan]  p.{label}  chunk {chunk_idx}")
-        if source:
-            console.print(f"[dim]{source}[/dim]")
-        console.print(text)
-        console.print()
+        _print_chunk(filename, meta, text)
 
     if missing_pages:
         console.print(f"[yellow]pages {_format_missing_pages(missing_pages)} not found in index[/yellow]")
+
+    # Navigation hint for single-page fetches
+    if single_page and sequence:
+        first_m, last_m = all_pairs[0][0], all_pairs[-1][0]
+        f_idx = _find_seq_index(sequence, first_m.get("page", page_start), first_m.get("chunk", 0))
+        l_idx = _find_seq_index(sequence, last_m.get("page", page_start), last_m.get("chunk", 0))
+        if f_idx is not None and l_idx is not None:
+            _print_nav_hint(filename, sequence, f_idx, l_idx)
 
 
 def cmd_list() -> None:

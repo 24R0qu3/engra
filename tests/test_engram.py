@@ -8,7 +8,9 @@ import pytest
 from engram.commands import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
+    _find_seq_index,
     _format_missing_pages,
+    _get_chunk_sequence,
     chunk_text,
     default_project,
     expand_paths,
@@ -396,6 +398,52 @@ def test_format_missing_pages_non_consecutive():
 
 def test_format_missing_pages_mixed():
     assert _format_missing_pages([3, 4, 7, 10, 11, 12]) == "3-4, 7, 10-12"
+
+
+# ── chunk navigation helpers ──────────────────────────────────────────────────
+
+
+def _make_col_stub(metas):
+    """Return a minimal chromadb collection stub for _get_chunk_sequence."""
+    from unittest.mock import MagicMock
+
+    col = MagicMock()
+    col.get.return_value = {"metadatas": metas, "documents": []}
+    return col
+
+
+def test_get_chunk_sequence_sorted():
+    metas = [
+        {"page": 2, "chunk": 0, "page_label": "2"},
+        {"page": 1, "chunk": 1, "page_label": "1"},
+        {"page": 1, "chunk": 0, "page_label": "1"},
+    ]
+    seq = _get_chunk_sequence(_make_col_stub(metas), "doc.pdf")
+    assert seq == [(1, 0, "1"), (1, 1, "1"), (2, 0, "2")]
+
+
+def test_get_chunk_sequence_deduplicates():
+    metas = [
+        {"page": 1, "chunk": 0, "page_label": "1"},
+        {"page": 1, "chunk": 0, "page_label": "1"},  # duplicate
+    ]
+    seq = _get_chunk_sequence(_make_col_stub(metas), "doc.pdf")
+    assert len(seq) == 1
+
+
+def test_find_seq_index_found():
+    seq = [(1, 0, "1"), (1, 1, "1"), (2, 0, "2")]
+    assert _find_seq_index(seq, 2, 0) == 2
+
+
+def test_find_seq_index_not_found():
+    seq = [(1, 0, "1"), (2, 0, "2")]
+    assert _find_seq_index(seq, 5, 0) is None
+
+
+def test_find_seq_index_first():
+    seq = [(3, 1, "3"), (4, 0, "4")]
+    assert _find_seq_index(seq, 3, 1) == 0
 
 
 # ── expand_paths ──────────────────────────────────────────────────────────────
