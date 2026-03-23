@@ -11,6 +11,7 @@ from engram.commands import (
     _find_seq_index,
     _format_missing_pages,
     _get_chunk_sequence,
+    _stale_warning,
     chunk_text,
     default_project,
     expand_paths,
@@ -444,6 +445,41 @@ def test_find_seq_index_not_found():
 def test_find_seq_index_first():
     seq = [(3, 1, "3"), (4, 0, "4")]
     assert _find_seq_index(seq, 3, 1) == 0
+
+
+# ── _stale_warning ────────────────────────────────────────────────────────────
+
+
+def test_stale_warning_missing_file(tmp_path):
+    nonexistent = str(tmp_path / "gone.pdf")
+    warning = _stale_warning(nonexistent, "2026-01-01T00:00:00", 1234.0)
+    assert warning is not None
+    assert "no longer exists" in warning
+    assert "gone.pdf" in warning
+
+
+def test_stale_warning_up_to_date(tmp_path):
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"data")
+    mtime = f.stat().st_mtime
+    assert _stale_warning(str(f), "2026-01-01T00:00:00", mtime) is None
+
+
+def test_stale_warning_changed_file(tmp_path):
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"data")
+    old_mtime = f.stat().st_mtime - 100  # simulate older stored mtime
+    warning = _stale_warning(str(f), "2026-01-01T00:00:00", old_mtime)
+    assert warning is not None
+    assert "changed since last indexed" in warning
+    assert "2026-01-01" in warning
+
+
+def test_stale_warning_no_mtime_stored(tmp_path):
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"data")
+    # old index entry: no source_mtime stored
+    assert _stale_warning(str(f), None, None) is None
 
 
 # ── expand_paths ──────────────────────────────────────────────────────────────

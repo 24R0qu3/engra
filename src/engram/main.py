@@ -43,13 +43,18 @@ def run() -> None:
     p_index = sub.add_parser("index", help="Index files or directories")
     p_index.add_argument(
         "files",
-        nargs="+",
+        nargs="*",
         type=Path,
         metavar="FILE_OR_DIR",
         help="Files or directories (pdf, txt, md, rst, html, docx, pptx, epub)",
     )
     p_index.add_argument("--force", action="store_true", help="Re-index even if already present")
     p_index.add_argument("--project", default=None, help="Project name (default: parent dir name)")
+    p_index.add_argument(
+        "--check",
+        action="store_true",
+        help="Report stale or missing source files without re-indexing",
+    )
     store_group = p_index.add_mutually_exclusive_group()
     store_group.add_argument("--link", action="store_true", help="Symlink files instead of copying")
     store_group.add_argument("--no-store", action="store_true", help="Do not copy or link the file")
@@ -144,14 +149,19 @@ def run() -> None:
     logger.info("engram %s started", __version__)
 
     if args.cmd == "index":
-        copy = False if args.link else None
-        cmd_index(
-            args.files,
-            force=args.force,
-            copy=copy,
-            store=not args.no_store,
-            project=args.project,
-        )
+        if args.check:
+            cmd_index([], check=True)
+        else:
+            if not args.files:
+                p_index.error("the following arguments are required: FILE_OR_DIR")
+            copy = False if args.link else None
+            cmd_index(
+                args.files,
+                force=args.force,
+                copy=copy,
+                store=not args.no_store,
+                project=args.project,
+            )
     elif args.cmd == "search":
         cmd_search(
             args.query,

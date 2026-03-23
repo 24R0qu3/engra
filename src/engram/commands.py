@@ -1,3 +1,4 @@
+import datetime
 import hashlib
 import logging
 import sys
@@ -109,6 +110,48 @@ def _build_where(
     return {"$and": clauses}
 
 
+# ── Staleness helpers ─────────────────────────────────────────────────────────
+
+
+def _stale_warning(source: str, indexed_at: str | None, source_mtime: float | None) -> str | None:
+    """Return a warning string if the source file is stale or missing, else None.
+
+    Returns None when the mtime check is unavailable (old index entry, OSError).
+    """
+    path = Path(source)
+    if not path.exists():
+        return (
+            f"⚠  source file no longer exists at {source}. "
+            f"Run: engram remove {path.name} to clean up."
+        )
+    if source_mtime is None:
+        return None  # pre-dates staleness tracking
+    try:
+        current_mtime = path.stat().st_mtime
+    except OSError:
+        return None  # unreliable mtime (e.g. network path)
+    if current_mtime != source_mtime:
+        date_str = (indexed_at or "")[:10] or "unknown"
+        return (
+            f"⚠  {source} has changed since last indexed ({date_str}). "
+            f"Run: engram index <path> to update."
+        )
+    return None
+
+
+def _warn_stale_from_metas(metas: list[dict]) -> None:
+    """Print stale warnings for unique source files found in a metadata list."""
+    seen: set[str] = set()
+    for m in metas:
+        src = m.get("source", "")
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        warning = _stale_warning(src, m.get("indexed_at"), m.get("source_mtime"))
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 
@@ -118,8 +161,31 @@ def cmd_index(
     copy: bool | None = None,
     store: bool = True,
     project: str | None = None,
+    check: bool = False,
 ) -> None:
     cfg = load_config()
+
+    if check:
+        collection = get_collection()
+        all_meta = collection.get(include=["metadatas"])["metadatas"]
+        if not all_meta:
+            console.print("[yellow]Knowledge base is empty.[/yellow]")
+            return
+        seen: set[str] = set()
+        found_stale = False
+        for m in all_meta:
+            src = m.get("source", "")
+            if not src or src in seen:
+                continue
+            seen.add(src)
+            warning = _stale_warning(src, m.get("indexed_at"), m.get("source_mtime"))
+            if warning:
+                console.print(f"[yellow]{warning}[/yellow]")
+                found_stale = True
+        if not found_stale:
+            console.print("[green]All indexed files are up to date.[/green]")
+        return
+
     if copy is None:
         copy = cfg["index"]["copy"]
 
@@ -178,6 +244,12 @@ def cmd_index(
             f"→ project [cyan]{proj}[/cyan]"
         )
 
+        indexed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        try:
+            source_mtime: float | None = file_path.stat().st_mtime
+        except OSError:
+            source_mtime = None
+
         try:
             chunk_texts, chunk_metas = [], []
             for section in sections:
@@ -194,6 +266,8 @@ def cmd_index(
                             "total_pages": section.total,
                             "chunk": chunk_idx,
                             "project": proj,
+                            "indexed_at": indexed_at,
+                            "source_mtime": source_mtime,
                         }
                     )
 
@@ -289,6 +363,7 @@ def cmd_search(
     metas = results["metadatas"][0]
     distances = results["distances"][0]
 
+    _warn_stale_from_metas(metas)
     console.print(f'\nResults for: [bold]"{query}"[/bold]')
     console.rule()
 
@@ -427,6 +502,13 @@ def cmd_get(
 ) -> None:
     """Retrieve full chunk text from the index by filename and page range."""
     col = get_collection()
+
+    # Stale/missing check for this file
+    file_metas = col.get(where={"filename": filename}, include=["metadatas"])
+    file_metas_list: list[dict] = file_metas.get("metadatas") or []
+    if file_metas_list:
+        _warn_stale_from_metas([file_metas_list[0]])
+
     sequence = _get_chunk_sequence(col, filename)
     single_page = page_start == page_end
     nav_mode = next_k is not None or prev_k is not None
@@ -528,6 +610,8 @@ def cmd_list() -> None:
                 "chunks": 0,
                 "pages": set(),
                 "total": m["total_pages"],
+                "indexed_at": m.get("indexed_at"),
+                "source_mtime": m.get("source_mtime"),
             }
         files[src]["chunks"] += 1
         files[src]["pages"].add(m["page"])
@@ -537,14 +621,23 @@ def cmd_list() -> None:
     table.add_column("File", style="bold")
     table.add_column("Chunks", justify="right")
     table.add_column("Pages", justify="right")
+    table.add_column("Stale", justify="center")
     table.add_column("Path", style="dim")
 
     for src, info in sorted(files.items(), key=lambda x: (x[1]["project"], x[1]["filename"])):
+        warning = _stale_warning(src, info.get("indexed_at"), info.get("source_mtime"))
+        if warning is None:
+            stale_cell = "[green]ok[/green]"
+        elif "no longer exists" in warning:
+            stale_cell = "[red]missing[/red]"
+        else:
+            stale_cell = "[yellow]⚠[/yellow]"
         table.add_row(
             info["project"],
             info["filename"],
             str(info["chunks"]),
             str(len(info["pages"])),
+            stale_cell,
             src,
         )
 
