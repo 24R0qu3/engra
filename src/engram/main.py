@@ -4,6 +4,10 @@ from pathlib import Path
 
 from engram import __version__
 from engram.commands import (
+    cmd_bookmark_list,
+    cmd_bookmark_remove,
+    cmd_bookmark_run,
+    cmd_bookmark_save,
     cmd_get,
     cmd_index,
     cmd_info,
@@ -137,6 +141,25 @@ def run() -> None:
     p_remove = sub.add_parser("remove", help="Remove a document from the index")
     p_remove.add_argument("pdf", type=Path)
 
+    # bookmark
+    p_bm = sub.add_parser("bookmark", help="Manage saved searches")
+    bm_sub = p_bm.add_subparsers(dest="bm_cmd", required=True)
+
+    p_bm_save = bm_sub.add_parser("save", help="Save a named search")
+    p_bm_save.add_argument("name")
+    p_bm_save.add_argument("--query", required=True, help="Search query to save")
+    p_bm_save.add_argument("--project", default=None, metavar="PROJECT")
+    p_bm_save.add_argument("--top", type=int, default=5, metavar="N")
+    p_bm_save.add_argument("--min-score", type=float, default=None, metavar="S", dest="min_score")
+
+    p_bm_run = bm_sub.add_parser("run", help="Re-run a saved search")
+    p_bm_run.add_argument("name")
+
+    bm_sub.add_parser("list", help="List all bookmarks")
+
+    p_bm_remove = bm_sub.add_parser("remove", help="Remove a bookmark")
+    p_bm_remove.add_argument("name")
+
     # project
     p_proj = sub.add_parser("project", help="Manage projects")
     proj_sub = p_proj.add_subparsers(dest="proj_cmd", required=True)
@@ -202,6 +225,21 @@ def run() -> None:
         cmd_list()
     elif args.cmd == "remove":
         cmd_remove(args.pdf)
+    elif args.cmd == "bookmark":
+        if args.bm_cmd == "save":
+            cmd_bookmark_save(
+                args.name,
+                query=args.query,
+                project=args.project,
+                top=args.top,
+                min_score=args.min_score,
+            )
+        elif args.bm_cmd == "run":
+            cmd_bookmark_run(args.name)
+        elif args.bm_cmd == "list":
+            cmd_bookmark_list()
+        elif args.bm_cmd == "remove":
+            cmd_bookmark_remove(args.name)
     elif args.cmd == "project":
         if args.proj_cmd == "list":
             cmd_project_list()

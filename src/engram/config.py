@@ -4,6 +4,7 @@ from pathlib import Path
 from platformdirs import user_config_dir
 
 CONFIG_PATH = Path(user_config_dir("engram", appauthor=False)) / "config.toml"
+BOOKMARKS_PATH = Path(user_config_dir("engram", appauthor=False)) / "bookmarks.json"
 
 DEFAULTS: dict = {
     "backend": {

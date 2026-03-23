@@ -17,7 +17,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from engram.config import load as load_config
+from engram.config import BOOKMARKS_PATH, load as load_config
 from engram.readers import SUPPORTED_EXTENSIONS, read_file
 from engram.storage import (
     DB_DIR,
@@ -744,6 +744,102 @@ def cmd_remove(pdf_path: Path) -> None:
         f"[green]Removed[/green] {len(existing['ids'])} chunks for "
         f"{Path(source).name}  [dim]({source})[/dim]"
     )
+
+
+# ── Bookmark commands ─────────────────────────────────────────────────────────
+
+
+def _load_bookmarks() -> dict[str, dict]:
+    """Load bookmarks from disk. Returns a dict keyed by bookmark name."""
+    if not BOOKMARKS_PATH.exists():
+        return {}
+    try:
+        import json as _json
+        return _json.loads(BOOKMARKS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_bookmarks(bookmarks: dict[str, dict]) -> None:
+    import json as _json
+    BOOKMARKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BOOKMARKS_PATH.write_text(_json.dumps(bookmarks, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def cmd_bookmark_save(
+    name: str,
+    query: str,
+    project: str | None = None,
+    top: int = 5,
+    min_score: float | None = None,
+) -> None:
+    bookmarks = _load_bookmarks()
+    if name in bookmarks:
+        answer = input(f"Overwrite existing bookmark '{name}'? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            console.print("[dim]Aborted.[/dim]")
+            return
+    bookmarks[name] = {
+        "name": name,
+        "query": query,
+        "project": project,
+        "top": top,
+        "min_score": min_score,
+        "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    _save_bookmarks(bookmarks)
+    console.print(f"[green]Saved[/green] bookmark [bold]{name!r}[/bold]")
+
+
+def cmd_bookmark_run(name: str) -> None:
+    bookmarks = _load_bookmarks()
+    if name not in bookmarks:
+        console.print(f"[yellow]No bookmark named {name!r}.[/yellow]")
+        if bookmarks:
+            console.print("Available: " + ", ".join(sorted(bookmarks)))
+        return
+    b = bookmarks[name]
+    projects = [b["project"]] if b.get("project") else None
+    cmd_search(
+        query=b["query"],
+        top_k=b.get("top", 5),
+        min_score=b.get("min_score") or 0.0,
+        projects=projects,
+    )
+
+
+def cmd_bookmark_list() -> None:
+    bookmarks = _load_bookmarks()
+    if not bookmarks:
+        console.print("[yellow]No bookmarks saved.[/yellow]")
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Name", style="bold cyan")
+    table.add_column("Query")
+    table.add_column("Project", style="dim")
+    table.add_column("Top", justify="right")
+    table.add_column("Min-score", justify="right")
+    for b in sorted(bookmarks.values(), key=lambda x: x["name"]):
+        table.add_row(
+            b["name"],
+            b["query"],
+            b.get("project") or "—",
+            str(b.get("top", 5)),
+            str(b.get("min_score") or "—"),
+        )
+    console.print(table)
+
+
+def cmd_bookmark_remove(name: str) -> None:
+    bookmarks = _load_bookmarks()
+    if name not in bookmarks:
+        console.print(f"[yellow]No bookmark named {name!r}.[/yellow]")
+        if bookmarks:
+            console.print("Available: " + ", ".join(sorted(bookmarks)))
+        return
+    del bookmarks[name]
+    _save_bookmarks(bookmarks)
+    console.print(f"[green]Removed[/green] bookmark [bold]{name!r}[/bold]")
 
 
 # ── Project commands ──────────────────────────────────────────────────────────

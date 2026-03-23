@@ -12,6 +12,8 @@ from engram.commands import (
     _find_seq_index,
     _format_missing_pages,
     _get_chunk_sequence,
+    _load_bookmarks,
+    _save_bookmarks,
     _stale_warning,
     chunk_text,
     default_project,
@@ -515,6 +517,46 @@ def test_search_all_overrides_projects():
     args = _make_search_parser().parse_args(["search", "q", "--all", "--project", "A"])
     # When --all is set, projects should be ignored in dispatch
     assert args.search_all is True
+
+
+# ── bookmark helpers ──────────────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def patched_bookmarks(tmp_path, monkeypatch):
+    import engram.config as cfg
+
+    bm_path = tmp_path / "bookmarks.json"
+    monkeypatch.setattr(cfg, "BOOKMARKS_PATH", bm_path)
+    # Also patch in commands module which imported at load time
+    import engram.commands as commands
+
+    monkeypatch.setattr(commands, "BOOKMARKS_PATH", bm_path)
+    yield bm_path
+
+
+def test_load_bookmarks_empty(patched_bookmarks):
+    assert _load_bookmarks() == {}
+
+
+def test_save_and_load_bookmarks(patched_bookmarks):
+    bm = {"myquery": {"name": "myquery", "query": "hello", "top": 5, "min_score": None, "created_at": "2026-01-01T00:00:00"}}
+    _save_bookmarks(bm)
+    assert _load_bookmarks() == bm
+
+
+def test_load_bookmarks_missing_file(patched_bookmarks):
+    assert not patched_bookmarks.exists()
+    assert _load_bookmarks() == {}
+
+
+def test_save_bookmarks_creates_dir(tmp_path, monkeypatch):
+    import engram.commands as commands
+
+    nested = tmp_path / "a" / "b" / "bookmarks.json"
+    monkeypatch.setattr(commands, "BOOKMARKS_PATH", nested)
+    _save_bookmarks({"x": {"name": "x"}})
+    assert nested.exists()
 
 
 # ── index metadata constants ──────────────────────────────────────────────────
