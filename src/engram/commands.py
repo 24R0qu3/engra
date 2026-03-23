@@ -268,6 +268,9 @@ def cmd_index(
                             "project": proj,
                             "indexed_at": indexed_at,
                             "source_mtime": source_mtime,
+                            "model": MODEL_NAME,
+                            "chunk_size": CHUNK_SIZE,
+                            "chunk_overlap": CHUNK_OVERLAP,
                         }
                     )
 
@@ -591,6 +594,67 @@ def cmd_get(
         l_idx = _find_seq_index(sequence, last_m.get("page", page_start), last_m.get("chunk", 0))
         if f_idx is not None and l_idx is not None:
             _print_nav_hint(filename, sequence, f_idx, l_idx)
+
+
+def cmd_info(filename: str | None = None) -> None:
+    """Display index statistics, optionally scoped to a single file."""
+    collection = get_collection()
+    if collection.count() == 0:
+        console.print("[yellow]Knowledge base is empty.[/yellow]")
+        return
+
+    all_meta: list[dict] = collection.get(include=["metadatas"])["metadatas"]
+
+    if filename:
+        file_meta = [m for m in all_meta if m.get("filename") == filename]
+        if not file_meta:
+            console.print(f"[yellow]No indexed file named {filename!r}[/yellow]")
+            return
+        sources = {m["source"] for m in file_meta}
+        chunk_count = len(file_meta)
+        page_count = len({m["page"] for m in file_meta})
+        indexed_at = file_meta[0].get("indexed_at", "unknown")
+        source_mtime_val = file_meta[0].get("source_mtime")
+        source_mtime_str = (
+            datetime.datetime.fromtimestamp(source_mtime_val).isoformat()
+            if source_mtime_val is not None
+            else "unknown"
+        )
+        stale = _stale_warning(file_meta[0]["source"], file_meta[0].get("indexed_at"), source_mtime_val)
+        stale_str = "[green]ok[/green]" if stale is None else "[yellow]⚠  stale[/yellow]" if "changed" in (stale or "") else "[red]missing[/red]"
+        rows = [
+            ("File", filename),
+            ("Source(s)", ", ".join(sorted(sources))),
+            ("Chunks", str(chunk_count)),
+            ("Pages", str(page_count)),
+            ("Indexed at", indexed_at),
+            ("Source mtime", source_mtime_str),
+            ("Stale", stale_str),
+        ]
+    else:
+        sample = all_meta[0] if all_meta else {}
+        model = sample.get("model", "unknown")
+        chunk_size = sample.get("chunk_size", "unknown")
+        chunk_overlap = sample.get("chunk_overlap", "unknown")
+        total_files = len({m["source"] for m in all_meta})
+        total_chunks = len(all_meta)
+        total_pages = len({(m["source"], m["page"]) for m in all_meta})
+        indexed_ats = [m["indexed_at"] for m in all_meta if m.get("indexed_at")]
+        last_indexed = max(indexed_ats) if indexed_ats else "unknown"
+        rows = [
+            ("Index path", str(DB_DIR)),
+            ("Embedding model", str(model)),
+            ("Chunk size", str(chunk_size)),
+            ("Chunk overlap", str(chunk_overlap)),
+            ("Total files", str(total_files)),
+            ("Total chunks", str(total_chunks)),
+            ("Total pages", str(total_pages)),
+            ("Last indexed", last_indexed),
+        ]
+
+    width = max(len(k) for k, _ in rows) + 2
+    for key, val in rows:
+        console.print(f"[bold]{key:<{width}}[/bold]{val}")
 
 
 def cmd_list() -> None:

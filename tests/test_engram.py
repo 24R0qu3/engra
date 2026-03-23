@@ -8,6 +8,7 @@ import pytest
 from engram.commands import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
+    MODEL_NAME,
     _find_seq_index,
     _format_missing_pages,
     _get_chunk_sequence,
@@ -480,6 +481,21 @@ def test_stale_warning_no_mtime_stored(tmp_path):
     f.write_bytes(b"data")
     # old index entry: no source_mtime stored
     assert _stale_warning(str(f), None, None) is None
+
+
+# ── index metadata constants ──────────────────────────────────────────────────
+
+
+def test_model_name_constant():
+    assert "multilingual" in MODEL_NAME
+
+
+def test_chunk_size_positive():
+    assert CHUNK_SIZE > 0
+
+
+def test_chunk_overlap_less_than_size():
+    assert CHUNK_OVERLAP < CHUNK_SIZE
 
 
 # ── expand_paths ──────────────────────────────────────────────────────────────

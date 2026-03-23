@@ -6,6 +6,7 @@ from engram import __version__
 from engram.commands import (
     cmd_get,
     cmd_index,
+    cmd_info,
     cmd_list,
     parse_page_range,
     cmd_project_activate,
@@ -115,6 +116,15 @@ def run() -> None:
         help="Show K chunks before the specified position (default K=1)",
     )
 
+    # info
+    p_info = sub.add_parser("info", help="Show index statistics")
+    p_info.add_argument(
+        "--file",
+        metavar="FILENAME",
+        default=None,
+        help="Show per-file stats for a specific file",
+    )
+
     # list
     sub.add_parser("list", help="List indexed documents")
 
@@ -181,6 +191,8 @@ def run() -> None:
         if page_start != page_end and (args.next is not None or args.prev is not None):
             p_get.error("--next/--prev are not allowed with a page range")
         cmd_get(args.filename, page_start, page_end, chunk=args.chunk, next_k=args.next, prev_k=args.prev)
+    elif args.cmd == "info":
+        cmd_info(filename=args.file)
     elif args.cmd == "list":
         cmd_list()
     elif args.cmd == "remove":
