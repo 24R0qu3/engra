@@ -24,7 +24,7 @@ from engra.commands import (
 from engra.config import _DEFAULT_TOML, DEFAULTS
 from engra.log import setup
 from engra.readers import SUPPORTED_EXTENSIONS, read_markdown, read_rst, read_text
-from engra.storage import clear_session, read_session, write_session
+from engra.storage import CACHE_DIR, clear_session, read_session, write_session
 
 # ── chunk_text ────────────────────────────────────────────────────────────────
 
@@ -706,3 +706,58 @@ def test_expand_paths_mixed(tmp_path):
     names = {p.name for p in result}
     assert "top.txt" in names
     assert "nested.md" in names
+
+
+# ── model loading & cache ──────────────────────────────────────────────────────
+
+
+def test_cache_dir_is_path():
+    assert hasattr(CACHE_DIR, "parent")  # is a Path
+
+
+def test_load_model_uses_cache_dir(monkeypatch):
+    """load_model passes CACHE_DIR/models as cache_dir to TextEmbedding."""
+    captured = {}
+
+    class FakeEmbedding:
+        def __init__(self, model_name, cache_dir=None, **kwargs):
+            captured["model_name"] = model_name
+            captured["cache_dir"] = cache_dir
+
+    import engra.commands as cmd
+
+    monkeypatch.setattr("builtins.__import__", __import__)  # ensure import still works
+
+    original_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "fastembed":
+            import types
+            m = types.ModuleType("fastembed")
+            m.TextEmbedding = FakeEmbedding
+            return m
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    # Reset any cached import of fastembed in commands module scope
+    import sys
+    sys.modules.pop("fastembed", None)
+
+    cmd.load_model()
+
+    assert captured["model_name"] == cmd.MODEL_NAME
+    assert captured["cache_dir"] == str(CACHE_DIR / "models")
+
+
+def test_main_suppresses_ort_warning():
+    """ORT_LOGGING_LEVEL is set before any fastembed import in main."""
+    import importlib
+    import os
+    import sys
+
+    # Remove os.environ entry if set, then reimport main (which sets it)
+    os.environ.pop("ORT_LOGGING_LEVEL", None)
+    sys.modules.pop("engra.main", None)
+    import engra.main  # noqa: F401 – side-effect: sets env var
+
+    assert os.environ.get("ORT_LOGGING_LEVEL") == "3"
