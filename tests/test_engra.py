@@ -13,6 +13,7 @@ from engra.commands import (
     _format_missing_pages,
     _get_chunk_sequence,
     _load_bookmarks,
+    _model_is_cached,
     _save_bookmarks,
     _stale_status,
     _stale_warning,
@@ -713,6 +714,33 @@ def test_expand_paths_mixed(tmp_path):
 
 def test_cache_dir_is_path():
     assert hasattr(CACHE_DIR, "parent")  # is a Path
+
+
+def test_model_is_cached_false_when_dir_missing(monkeypatch, tmp_path):
+    import engra.commands as cmd
+
+    monkeypatch.setattr(cmd, "CACHE_DIR", tmp_path)
+    assert _model_is_cached() is False
+
+
+def test_model_is_cached_true_when_onnx_present(monkeypatch, tmp_path):
+    import engra.commands as cmd
+
+    model_dir = tmp_path / "models" / MODEL_NAME.replace("/", "__")
+    model_dir.mkdir(parents=True)
+    (model_dir / "model.onnx").touch()
+    monkeypatch.setattr(cmd, "CACHE_DIR", tmp_path)
+    assert _model_is_cached() is True
+
+
+def test_model_is_cached_false_when_no_onnx(monkeypatch, tmp_path):
+    import engra.commands as cmd
+
+    model_dir = tmp_path / "models" / MODEL_NAME.replace("/", "__")
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").touch()  # no .onnx
+    monkeypatch.setattr(cmd, "CACHE_DIR", tmp_path)
+    assert _model_is_cached() is False
 
 
 def test_load_model_uses_cache_dir(monkeypatch):

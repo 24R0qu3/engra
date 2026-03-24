@@ -50,10 +50,22 @@ def get_collection() -> chromadb.Collection:
     )
 
 
+def _model_is_cached() -> bool:
+    """Return True if the model ONNX file exists in the cache directory."""
+    model_dir = CACHE_DIR / "models" / MODEL_NAME.replace("/", "__")
+    return any(model_dir.glob("*.onnx")) if model_dir.exists() else False
+
+
 def load_model():
     from fastembed import TextEmbedding  # noqa: PLC0415 – lazy import avoids ORT load on non-embedding commands
 
-    console.print(f"[dim]Loading model '{MODEL_NAME}'...[/dim]")
+    if _model_is_cached():
+        console.print(f"[dim]Loading model '{MODEL_NAME}'...[/dim]")
+    else:
+        console.print(
+            f"[bold]First run:[/bold] downloading model [cyan]{MODEL_NAME}[/cyan] "
+            f"to [dim]{CACHE_DIR / 'models'}[/dim] (one-time, ~1 GB)…"
+        )
     return TextEmbedding(MODEL_NAME, cache_dir=str(CACHE_DIR / "models"))
 
 
