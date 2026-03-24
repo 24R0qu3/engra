@@ -17,9 +17,9 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from engram.config import BOOKMARKS_PATH, load as load_config
-from engram.readers import SUPPORTED_EXTENSIONS, read_file
-from engram.storage import (
+from engra.config import BOOKMARKS_PATH, load as load_config
+from engra.readers import SUPPORTED_EXTENSIONS, read_file
+from engra.storage import (
     DB_DIR,
     clear_session,
     ensure_dirs,
@@ -122,7 +122,7 @@ def _stale_warning(source: str, indexed_at: str | None, source_mtime: float | No
     if not path.exists():
         return (
             f"⚠  source file no longer exists at {source}. "
-            f"Run: engram remove {path.name} to clean up."
+            f"Run: engra remove {path.name} to clean up."
         )
     if source_mtime is None:
         return None  # pre-dates staleness tracking
@@ -134,7 +134,7 @@ def _stale_warning(source: str, indexed_at: str | None, source_mtime: float | No
         date_str = (indexed_at or "")[:10] or "unknown"
         return (
             f"⚠  {source} has changed since last indexed ({date_str}). "
-            f"Run: engram index <path> to update."
+            f"Run: engra index <path> to update."
         )
     return None
 
@@ -334,7 +334,7 @@ def cmd_search(
     collection = get_collection()
     if collection.count() == 0:
         console.print(
-            "[yellow]Knowledge base is empty.[/yellow] Run: [bold]engram index <file.pdf>[/bold]"
+            "[yellow]Knowledge base is empty.[/yellow] Run: [bold]engra index <file.pdf>[/bold]"
         )
         return
 
@@ -477,13 +477,13 @@ def _print_nav_hint(filename: str, sequence: list[tuple[int, int, str]], first_i
     """Print ← prev / next → navigation hint based on displayed range."""
     if first_idx > 0:
         pp, pc, _ = sequence[first_idx - 1]
-        prev_line = f"[dim]← prev: engram get {filename} {pp} --chunk {pc}[/dim]"
+        prev_line = f"[dim]← prev: engra get {filename} {pp} --chunk {pc}[/dim]"
     else:
         prev_line = "[dim]← (start of document)[/dim]"
 
     if last_idx < len(sequence) - 1:
         np_, nc, _ = sequence[last_idx + 1]
-        next_line = f"[dim]   next: engram get {filename} {np_} --chunk {nc} →[/dim]"
+        next_line = f"[dim]   next: engra get {filename} {np_} --chunk {nc} →[/dim]"
     else:
         next_line = "[dim]   (end of document) →[/dim]"
 

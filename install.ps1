@@ -1,6 +1,6 @@
-# install.ps1 — download and install engram from the latest GitHub release.
+# install.ps1 — download and install engra from the latest GitHub release.
 # Usage (PowerShell):
-#   irm https://raw.githubusercontent.com/<owner>/engram/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/<owner>/engra/main/install.ps1 | iex
 #   # or with a custom install location:
 #   $env:INSTALL_DIR = "C:\Tools"; irm .../install.ps1 | iex
 param(
@@ -9,8 +9,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo    = "<owner>/engram"
-$BinName = "engram"
+$Repo    = "<owner>/engra"
+$BinName = "engra"
 
 if (-not $InstallDir) {
     $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\$BinName"

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from engram.commands import (
+from engra.commands import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     MODEL_NAME,
@@ -20,10 +20,10 @@ from engram.commands import (
     expand_paths,
     parse_page_range,
 )
-from engram.config import _DEFAULT_TOML, DEFAULTS
-from engram.log import setup
-from engram.readers import SUPPORTED_EXTENSIONS, read_markdown, read_rst, read_text
-from engram.storage import clear_session, read_session, write_session
+from engra.config import _DEFAULT_TOML, DEFAULTS
+from engra.log import setup
+from engra.readers import SUPPORTED_EXTENSIONS, read_markdown, read_rst, read_text
+from engra.storage import clear_session, read_session, write_session
 
 # ── chunk_text ────────────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ def test_defaults_index_copy():
 
 
 def test_load_returns_defaults_when_no_file(tmp_path, monkeypatch):
-    from engram import config
+    from engra import config
 
     monkeypatch.setattr(config, "CONFIG_PATH", tmp_path / "nonexistent.toml")
     result = config.load()
@@ -90,7 +90,7 @@ def test_load_returns_defaults_when_no_file(tmp_path, monkeypatch):
 
 
 def test_load_merges_user_values(tmp_path, monkeypatch):
-    from engram import config
+    from engra import config
 
     cfg_file = tmp_path / "config.toml"
     cfg_file.write_text("[index]\ncopy = false\n")
@@ -101,7 +101,7 @@ def test_load_merges_user_values(tmp_path, monkeypatch):
 
 
 def test_init_creates_config(tmp_path, monkeypatch):
-    from engram import config
+    from engra import config
 
     cfg_file = tmp_path / "config.toml"
     monkeypatch.setattr(config, "CONFIG_PATH", cfg_file)
@@ -110,7 +110,7 @@ def test_init_creates_config(tmp_path, monkeypatch):
 
 
 def test_init_does_not_overwrite(tmp_path, monkeypatch):
-    from engram import config
+    from engra import config
 
     cfg_file = tmp_path / "config.toml"
     cfg_file.write_text("custom = true\n")
@@ -133,34 +133,34 @@ def clean_root_logger():
 
 
 def test_root_logger_set_to_debug(tmp_path):
-    setup(log_path=str(tmp_path / "engram.log"))
+    setup(log_path=str(tmp_path / "engra.log"))
     assert logging.getLogger().level == logging.DEBUG
 
 
 def test_console_handler_level(tmp_path):
-    console, _ = setup(console_level="INFO", log_path=str(tmp_path / "engram.log"))
+    console, _ = setup(console_level="INFO", log_path=str(tmp_path / "engra.log"))
     assert console.level == logging.INFO
 
 
 def test_file_handler_level(tmp_path):
-    _, file = setup(file_level="WARNING", log_path=str(tmp_path / "engram.log"))
+    _, file = setup(file_level="WARNING", log_path=str(tmp_path / "engra.log"))
     assert file.level == logging.WARNING
 
 
 def test_log_file_created(tmp_path):
-    log_path = tmp_path / "engram.log"
+    log_path = tmp_path / "engra.log"
     setup(log_path=str(log_path))
     assert log_path.exists()
 
 
 def test_log_directory_created(tmp_path):
-    log_path = tmp_path / "subdir" / "engram.log"
+    log_path = tmp_path / "subdir" / "engra.log"
     setup(log_path=str(log_path))
     assert log_path.parent.exists()
 
 
 def test_two_handlers_attached(tmp_path):
-    handlers = setup(log_path=str(tmp_path / "engram.log"))
+    handlers = setup(log_path=str(tmp_path / "engra.log"))
     assert len(handlers) == 2
 
 
@@ -257,7 +257,7 @@ def test_default_project_fallback(tmp_path):
 
 @pytest.fixture()
 def patched_state(tmp_path, monkeypatch):
-    import engram.storage as storage
+    import engra.storage as storage
 
     monkeypatch.setattr(storage, "STATE_FILE", tmp_path / "state.toml")
     yield tmp_path / "state.toml"
@@ -524,12 +524,12 @@ def test_search_all_overrides_projects():
 
 @pytest.fixture()
 def patched_bookmarks(tmp_path, monkeypatch):
-    import engram.config as cfg
+    import engra.config as cfg
 
     bm_path = tmp_path / "bookmarks.json"
     monkeypatch.setattr(cfg, "BOOKMARKS_PATH", bm_path)
     # Also patch in commands module which imported at load time
-    import engram.commands as commands
+    import engra.commands as commands
 
     monkeypatch.setattr(commands, "BOOKMARKS_PATH", bm_path)
     yield bm_path
@@ -551,7 +551,7 @@ def test_load_bookmarks_missing_file(patched_bookmarks):
 
 
 def test_save_bookmarks_creates_dir(tmp_path, monkeypatch):
-    import engram.commands as commands
+    import engra.commands as commands
 
     nested = tmp_path / "a" / "b" / "bookmarks.json"
     monkeypatch.setattr(commands, "BOOKMARKS_PATH", nested)

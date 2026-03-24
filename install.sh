@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# install.sh — download and install engram from the latest GitHub release.
+# install.sh — download and install engra from the latest GitHub release.
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/<owner>/engram/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/<owner>/engra/main/install.sh | bash
 #   INSTALL_DIR=/usr/local/bin bash install.sh   # custom location (needs sudo)
 set -euo pipefail
 
-REPO="<owner>/engram"
-BIN_NAME="engram"
+REPO="<owner>/engra"
+BIN_NAME="engra"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # ── Detect platform ───────────────────────────────────────────────────────────

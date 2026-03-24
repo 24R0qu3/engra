@@ -6,7 +6,7 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-DATA_DIR = Path(user_data_dir("engram", appauthor=False))
+DATA_DIR = Path(user_data_dir("engra", appauthor=False))
 FILES_DIR = DATA_DIR / "files"
 DB_DIR = DATA_DIR / "db"
 STATE_FILE = DATA_DIR / "state.toml"
@@ -20,7 +20,7 @@ def ensure_dirs() -> None:
 
 
 def store_file(pdf_path: Path, copy: bool = True) -> Path:
-    """Copy or symlink a PDF into the engram files directory. Returns stored path."""
+    """Copy or symlink a PDF into the engra files directory. Returns stored path."""
     ensure_dirs()
     dest = FILES_DIR / pdf_path.name
     if dest.exists() or dest.is_symlink():

@@ -13,7 +13,7 @@ def setup(
     backup_count: int = 3,
 ):
     if log_path is None:
-        log_path = str(Path(user_log_dir("engram", appauthor=False)) / "engram.log")
+        log_path = str(Path(user_log_dir("engra", appauthor=False)) / "engra.log")
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)

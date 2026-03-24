@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.scripts]
-engra = "engram.main:run"
+engra = "engra.main:run"
 
 [project.optional-dependencies]
 gpu = ["fastembed-gpu"]  # replaces fastembed; run: pip install ".[gpu]"
@@ -31,7 +31,7 @@ dev = ["bump-my-version", "ruff"]
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "engram.__version__"}
+version = {attr = "engra.__version__"}
 
 [tool.bumpversion]
 current_version = "0.1.0"
@@ -40,7 +40,7 @@ tag = true
 tag_name = "v{new_version}"
 
 [[tool.bumpversion.files]]
-filename = "src/engram/__init__.py"
+filename = "src/engra/__init__.py"
 search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'
 

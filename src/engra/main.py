@@ -2,8 +2,8 @@ import argparse
 import logging
 from pathlib import Path
 
-from engram import __version__
-from engram.commands import (
+from engra import __version__
+from engra.commands import (
     cmd_bookmark_list,
     cmd_bookmark_remove,
     cmd_bookmark_run,
@@ -22,8 +22,8 @@ from engram.commands import (
     cmd_remove,
     cmd_search,
 )
-from engram.config import init as init_config
-from engram.log import setup as setup_logging
+from engra.config import init as init_config
+from engra.log import setup as setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ def run() -> None:
     init_config()
 
     parser = argparse.ArgumentParser(
-        prog="engram",
+        prog="engra",
         description="Local-first semantic search over your documents.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -184,7 +184,7 @@ def run() -> None:
     if args.log_path:
         log_kwargs["log_path"] = args.log_path
     setup_logging(**log_kwargs)
-    logger.info("engram %s started", __version__)
+    logger.info("engra %s started", __version__)
 
     if args.cmd == "index":
         if args.check:
