@@ -687,7 +687,8 @@ def cmd_info(filename: str | None = None) -> None:
 
     width = max(len(k) for k, _ in rows) + 2
     for key, val in rows:
-        console.print(f"[bold]{key:<{width}}[/bold]{val}")
+        hint = "  [dim](re-index to populate)[/dim]" if val == "unknown" else ""
+        console.print(f"[bold]{key:<{width}}[/bold]{val}{hint}")
 
 
 def cmd_list() -> None:

@@ -591,6 +591,75 @@ def test_save_bookmarks_creates_dir(tmp_path, monkeypatch):
     assert nested.exists()
 
 
+# ── cmd_info unknown-field hint ───────────────────────────────────────────────
+
+
+def _make_info_col_stub(metas):
+    from unittest.mock import MagicMock
+
+    col = MagicMock()
+    col.count.return_value = len(metas)
+    col.get.return_value = {"metadatas": metas, "documents": [], "ids": []}
+    return col
+
+
+def _capture_info(monkeypatch, metas, filename=None):
+    """Run cmd_info with a mocked collection and return printed text."""
+    import io
+    from rich.console import Console
+    import engra.commands as commands
+
+    col = _make_info_col_stub(metas)
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+
+    buf = io.StringIO()
+    fake_console = Console(file=buf, highlight=False, markup=False)
+    monkeypatch.setattr(commands, "console", fake_console)
+
+    commands.cmd_info(filename=filename)
+    return buf.getvalue()
+
+
+def test_info_unknown_fields_show_hint(tmp_path, monkeypatch):
+    """Fields missing from old index entries display a re-index hint."""
+    metas = [
+        {
+            "source": str(tmp_path / "doc.pdf"),
+            "filename": "doc.pdf",
+            "page": 1,
+            "chunk": 0,
+            "page_label": "1",
+            "total_pages": 1,
+            "project": "test",
+            # model, chunk_size, chunk_overlap, indexed_at intentionally absent
+        }
+    ]
+    out = _capture_info(monkeypatch, metas)
+    assert "re-index to populate" in out
+
+
+def test_info_known_fields_no_hint(tmp_path, monkeypatch):
+    """Fully-populated index entries show no re-index hint."""
+    metas = [
+        {
+            "source": str(tmp_path / "doc.pdf"),
+            "filename": "doc.pdf",
+            "page": 1,
+            "chunk": 0,
+            "page_label": "1",
+            "total_pages": 1,
+            "project": "test",
+            "model": "intfloat/multilingual-e5-large",
+            "chunk_size": 1500,
+            "chunk_overlap": 200,
+            "indexed_at": "2026-01-01T00:00:00+00:00",
+            "source_mtime": 1234567890.0,
+        }
+    ]
+    out = _capture_info(monkeypatch, metas)
+    assert "re-index to populate" not in out
+
+
 # ── index metadata constants ──────────────────────────────────────────────────
 
 
