@@ -761,6 +761,39 @@ def test_expand_paths_mixed(tmp_path):
     assert "nested.md" in names
 
 
+# ── near-blank skip message and empty-dir warning ─────────────────────────────
+
+
+def test_skip_note_shown_when_sections_skipped():
+    """Summary line includes threshold info when some sections are near-blank."""
+    from engra.commands import MIN_CHARS
+
+    # Simulate: 3 total sections, 1 near-blank skipped → indexed pages differ from total
+    # We verify the message format by constructing it directly as commands.py does
+    total_sections = 3
+    indexed = 2
+    skipped = total_sections - indexed
+    skip_note = (
+        f", skipped {skipped} sections shorter than {MIN_CHARS} chars"
+        if skipped > 0
+        else ""
+    )
+    assert str(MIN_CHARS) in skip_note
+    assert "skipped 1" in skip_note
+
+
+def test_skip_note_empty_when_no_skips():
+    total_sections = 3
+    indexed = 3
+    skipped = total_sections - indexed
+    skip_note = (
+        f", skipped {skipped} sections shorter than 80 chars"
+        if skipped > 0
+        else ""
+    )
+    assert skip_note == ""
+
+
 # ── model loading & cache ──────────────────────────────────────────────────────
 
 

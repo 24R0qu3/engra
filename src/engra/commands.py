@@ -235,7 +235,15 @@ def cmd_index(
     collection = get_collection()
     model = load_model()
 
-    for file_path in expand_paths(paths):
+    expanded = expand_paths(paths)
+    if not expanded:
+        console.print(
+            "[yellow][warning][/yellow] No supported files found. "
+            f"Supported extensions: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        )
+        return
+
+    for file_path in expanded:
         if not file_path.exists():
             console.print(f"[yellow][skip][/yellow] not found: {file_path}")
             continue
@@ -339,10 +347,15 @@ def cmd_index(
             raise SystemExit(1)
 
         indexed = len({m["page"] for m in metadatas})
+        skipped = total_sections - indexed
+        skip_note = (
+            f", skipped {skipped} sections shorter than {MIN_CHARS} chars"
+            if skipped > 0
+            else ""
+        )
         console.print(
             f"  → [green]{len(ids)} chunks[/green] from "
-            f"{indexed}/{total_sections} sections "
-            f"(skipped {total_sections - indexed} near-blank)"
+            f"{indexed}/{total_sections} sections{skip_note}"
         )
 
         if ids:
