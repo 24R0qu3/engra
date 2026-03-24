@@ -19,6 +19,7 @@ from engra.commands import (
     cmd_index,
     cmd_info,
     cmd_list,
+    cmd_mcp,
     parse_page_range,
     cmd_project_activate,
     cmd_project_active,
@@ -170,6 +171,9 @@ def run() -> None:
     # list
     sub.add_parser("list", help="List indexed documents")
 
+    # mcp
+    sub.add_parser("mcp", help="Start MCP stdio server (requires pip install 'engra[mcp]')")
+
     # remove
     p_remove = sub.add_parser("remove", help="Remove a document from the index")
     p_remove.add_argument("pdf", type=Path)
@@ -263,6 +267,8 @@ def run() -> None:
         cmd_info(filename=args.file)
     elif args.cmd == "list":
         cmd_list()
+    elif args.cmd == "mcp":
+        cmd_mcp()
     elif args.cmd == "remove":
         cmd_remove(args.pdf)
     elif args.cmd == "bookmark":
