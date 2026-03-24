@@ -20,18 +20,6 @@ pip install -e .
 pip install -e ".[gpu]"               # for GPU support
 ```
 
-### One-liner (once published to GitHub releases)
-
-**Linux / macOS**
-```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/engra/main/install.sh | bash
-```
-
-**Windows (PowerShell)**
-```powershell
-irm https://raw.githubusercontent.com/<owner>/engra/main/install.ps1 | iex
-```
-
 ## Quick start
 
 ```bash
