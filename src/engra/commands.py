@@ -2,6 +2,7 @@ import datetime
 import hashlib
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import chromadb
@@ -178,6 +179,405 @@ def _warn_stale_from_metas(metas: list[dict]) -> None:
             console.print(f"[yellow]{warning}[/yellow]")
 
 
+# ── Data functions (pure retrieval, no console output) ────────────────────────
+
+
+def _data_index(
+    paths: list[Path],
+    force: bool = False,
+    copy: bool = True,
+    store: bool = True,
+    project: str | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    """Index files. Returns {total_chunks, results: [{path, filename, status, ...}]}.
+
+    Each result has status 'indexed' | 'skipped' | 'error'.
+    on_progress(done, total, filename) is called after each chunk is embedded.
+    Raises RuntimeError on KeyboardInterrupt (cleaned up, no partial data).
+    """
+    collection = get_collection()
+    model = load_model()
+    expanded = expand_paths(paths)
+
+    results: list[dict] = []
+
+    for file_path in expanded:
+        entry: dict = {"path": str(file_path), "filename": file_path.name}
+
+        if not file_path.exists():
+            results.append({**entry, "status": "skipped", "reason": "not found"})
+            continue
+
+        if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+            results.append({
+                **entry, "status": "skipped",
+                "reason": f"unsupported type {file_path.suffix}",
+            })
+            continue
+
+        proj = project or default_project(file_path)
+        prefix = doc_id_prefix(file_path)
+        existing = collection.get(where={"source": str(file_path.resolve())})
+
+        if existing["ids"] and not force:
+            results.append({
+                **entry, "status": "skipped",
+                "reason": f"already indexed ({len(existing['ids'])} chunks)",
+            })
+            continue
+
+        reindexed = False
+        if existing["ids"]:
+            collection.delete(ids=existing["ids"])
+            reindexed = True
+
+        store_action: str | None = None
+        if store:
+            store_file(file_path, copy=copy)
+            store_action = "copied" if copy else "linked"
+
+        try:
+            sections = read_file(file_path)
+        except Exception as exc:
+            results.append({**entry, "status": "error", "reason": f"read error: {exc}"})
+            continue
+
+        total_sections = sections[0].total if sections else 0
+        indexed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        try:
+            source_mtime: float | None = file_path.stat().st_mtime
+        except OSError:
+            source_mtime = None
+
+        chunk_texts: list[str] = []
+        chunk_metas: list[dict] = []
+        for section in sections:
+            if len(section.text) < MIN_CHARS:
+                continue
+            for chunk_idx, chunk in enumerate(chunk_text(section.text)):
+                chunk_texts.append(chunk)
+                chunk_metas.append({
+                    "source": str(file_path.resolve()),
+                    "filename": file_path.name,
+                    "page": section.phys_page,
+                    "page_label": section.page_label,
+                    "total_pages": section.total,
+                    "chunk": chunk_idx,
+                    "project": proj,
+                    "indexed_at": indexed_at,
+                    "source_mtime": source_mtime,
+                    "model": MODEL_NAME,
+                    "chunk_size": CHUNK_SIZE,
+                    "chunk_overlap": CHUNK_OVERLAP,
+                })
+
+        ids: list[str] = []
+        embeddings: list[list[float]] = []
+        documents: list[str] = []
+        metadatas: list[dict] = []
+
+        try:
+            embed_gen = model.embed(chunk_texts, batch_size=32)
+            for chunk, meta, embedding in zip(chunk_texts, chunk_metas, embed_gen):
+                ids.append(f"{prefix}_p{meta['page']}_c{meta['chunk']}")
+                embeddings.append(embedding.tolist())
+                documents.append(chunk)
+                metadatas.append(meta)
+                if on_progress:
+                    on_progress(len(ids), len(chunk_texts), file_path.name)
+        except KeyboardInterrupt:
+            partial = collection.get(where={"source": str(file_path.resolve())})
+            if partial["ids"]:
+                collection.delete(ids=partial["ids"])
+            raise RuntimeError(
+                f"Interrupted while indexing {file_path.name}. No partial data left."
+            )
+
+        if ids:
+            batch = 100
+            for i in range(0, len(ids), batch):
+                collection.add(
+                    ids=ids[i : i + batch],
+                    embeddings=embeddings[i : i + batch],
+                    documents=documents[i : i + batch],
+                    metadatas=metadatas[i : i + batch],
+                )
+
+        sections_indexed = len({m["page"] for m in metadatas})
+        results.append({
+            **entry,
+            "status": "indexed",
+            "reason": None,
+            "project": proj,
+            "chunks_added": len(ids),
+            "sections_indexed": sections_indexed,
+            "total_sections": total_sections,
+            "reindexed": reindexed,
+            "store_action": store_action,
+        })
+
+    return {"total_chunks": collection.count(), "results": results}
+
+
+def _data_search(
+    query: str,
+    top_k: int = 5,
+    min_score: float = 0.0,
+    filename: str | None = None,
+    projects: list[str] | None = None,
+) -> list[dict]:
+    """Semantic search. Returns list of result dicts with text and metadata.
+
+    projects=None uses the active session; pass [] to search globally.
+    """
+    collection = get_collection()
+    if collection.count() == 0:
+        return []
+
+    active_projects = projects if projects is not None else read_session()
+    where = _build_where(active_projects, filename)
+
+    model = load_model()
+    query_embedding = next(model.query_embed([query])).tolist()
+
+    query_kwargs: dict = dict(
+        query_embeddings=[query_embedding],
+        n_results=min(top_k * 3 if min_score > 0 else top_k, collection.count()),
+        include=["documents", "metadatas", "distances"],
+    )
+    if where:
+        query_kwargs["where"] = where
+
+    results = collection.query(**query_kwargs)
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
+    distances = results["distances"][0]
+
+    output: list[dict] = []
+    shown = 0
+    for text, meta, dist in zip(docs, metas, distances):
+        score = 1.0 - dist
+        if score < min_score:
+            continue
+        shown += 1
+        if shown > top_k:
+            break
+        output.append({
+            "filename": meta["filename"],
+            "page": meta["page"],
+            "page_label": meta.get("page_label", str(meta["page"])),
+            "total_pages": meta.get("total_pages", 0),
+            "chunk": meta.get("chunk", 0),
+            "score": round(score, 4),
+            "text": text,
+            "project": meta.get("project", ""),
+            "source": meta.get("source", ""),
+            "indexed_at": meta.get("indexed_at"),
+            "source_mtime": meta.get("source_mtime"),
+        })
+
+    return output
+
+
+def _data_get_chunks(
+    filename: str,
+    page_start: int,
+    page_end: int,
+    chunk: int | None = None,
+) -> list[dict]:
+    """Retrieve full chunk text for a page range. Returns list of chunk dicts."""
+    col = get_collection()
+    all_pairs: list[tuple[dict, str]] = []
+
+    for page in range(page_start, page_end + 1):
+        clauses: list[dict] = [{"filename": filename}, {"page": page}]
+        if chunk is not None:
+            clauses.append({"chunk": chunk})
+        r = col.get(where={"$and": clauses}, include=["documents", "metadatas"])
+        docs: list[str] = r.get("documents") or []
+        metas: list[dict] = r.get("metadatas") or []
+        if not docs:
+            continue
+        all_pairs.extend(
+            sorted(zip(metas, docs), key=lambda x: (x[0].get("page", page), x[0].get("chunk", 0)))
+        )
+
+    return [
+        {
+            "filename": filename,
+            "page": meta.get("page", page_start),
+            "page_label": meta.get("page_label", str(meta.get("page", page_start))),
+            "chunk_idx": meta.get("chunk", 0),
+            "text": text,
+            "source": meta.get("source", ""),
+        }
+        for meta, text in all_pairs
+    ]
+
+
+def _data_get_neighbors(
+    filename: str,
+    page: int,
+    chunk: int,
+    direction: str = "next",
+    count: int = 1,
+) -> list[dict]:
+    """Retrieve adjacent chunks. direction is 'next', 'prev', or 'both'.
+
+    'both' returns prev chunks first, then next chunks.
+    Returns [] if the anchor (page, chunk) is not found or already at boundary.
+    """
+    if direction not in ("next", "prev", "both"):
+        raise ValueError(f"direction must be 'next', 'prev', or 'both', got {direction!r}")
+
+    col = get_collection()
+    sequence = _get_chunk_sequence(col, filename)
+    ref_idx = _find_seq_index(sequence, page, chunk)
+    if ref_idx is None:
+        return []
+
+    if direction == "next":
+        targets = list(range(ref_idx + 1, min(ref_idx + 1 + count, len(sequence))))
+    elif direction == "prev":
+        targets = list(range(max(0, ref_idx - count), ref_idx))
+    else:  # both
+        targets = (
+            list(range(max(0, ref_idx - count), ref_idx))
+            + list(range(ref_idx + 1, min(ref_idx + 1 + count, len(sequence))))
+        )
+
+    result: list[dict] = []
+    for seq_idx in targets:
+        tp, tc, _ = sequence[seq_idx]
+        r = col.get(
+            where={"$and": [{"filename": filename}, {"page": tp}, {"chunk": tc}]},
+            include=["documents", "metadatas"],
+        )
+        for meta, text in zip(r.get("metadatas") or [], r.get("documents") or []):
+            result.append({
+                "filename": filename,
+                "page": meta.get("page", tp),
+                "page_label": meta.get("page_label", str(tp)),
+                "chunk_idx": meta.get("chunk", tc),
+                "text": text,
+                "source": meta.get("source", ""),
+            })
+
+    return result
+
+
+def _data_list_projects() -> list[dict]:
+    """Return per-project stats. Returns [] when index is empty."""
+    collection = get_collection()
+    if collection.count() == 0:
+        return []
+
+    all_meta = collection.get(include=["metadatas"])["metadatas"]
+    projects: dict[str, dict] = {}
+    for m in all_meta:
+        proj = m.get("project", "—")
+        if proj not in projects:
+            projects[proj] = {"chunks": 0, "files": set()}
+        projects[proj]["chunks"] += 1
+        projects[proj]["files"].add(m["filename"])
+
+    return [
+        {"name": name, "file_count": len(info["files"]), "chunk_count": info["chunks"]}
+        for name, info in sorted(projects.items())
+    ]
+
+
+def _data_list_files(project: str | None = None) -> list[dict]:
+    """Return per-file stats, optionally filtered by project."""
+    collection = get_collection()
+    if collection.count() == 0:
+        return []
+
+    all_meta = collection.get(include=["metadatas"])["metadatas"]
+    files: dict[str, dict] = {}
+    for m in all_meta:
+        src = m["source"]
+        if project and m.get("project") != project:
+            continue
+        if src not in files:
+            files[src] = {
+                "filename": m["filename"],
+                "project": m.get("project", "—"),
+                "chunks": 0,
+                "pages": set(),
+                "indexed_at": m.get("indexed_at"),
+                "source_mtime": m.get("source_mtime"),
+            }
+        files[src]["chunks"] += 1
+        files[src]["pages"].add(m["page"])
+
+    return [
+        {
+            "filename": info["filename"],
+            "project": info["project"],
+            "chunks": info["chunks"],
+            "pages": len(info["pages"]),
+            "indexed_at": info.get("indexed_at") or "unknown",
+            "stale_status": _stale_status(src, info.get("source_mtime")),
+            "source": src,
+        }
+        for src, info in sorted(files.items(), key=lambda x: (x[1]["project"], x[1]["filename"]))
+    ]
+
+
+def _data_info() -> dict:
+    """Return global index statistics."""
+    collection = get_collection()
+    if collection.count() == 0:
+        return {
+            "total_chunks": 0, "files": 0, "projects": 0,
+            "model": MODEL_NAME, "chunk_size": CHUNK_SIZE,
+            "chunk_overlap": CHUNK_OVERLAP, "last_indexed": "unknown",
+        }
+
+    all_meta = collection.get(include=["metadatas"])["metadatas"]
+    sample = all_meta[0]
+    return {
+        "total_chunks": len(all_meta),
+        "files": len({m["source"] for m in all_meta}),
+        "projects": len({m.get("project", "") for m in all_meta}),
+        "model": sample.get("model", "unknown"),
+        "chunk_size": sample.get("chunk_size", "unknown"),
+        "chunk_overlap": sample.get("chunk_overlap", "unknown"),
+        "last_indexed": max(
+            (m["indexed_at"] for m in all_meta if m.get("indexed_at")), default="unknown"
+        ),
+    }
+
+
+def _data_project_activate(names: list[str]) -> dict:
+    """Activate projects; returns {active_projects, unknown}."""
+    collection = get_collection()
+    all_meta = collection.get(include=["metadatas"])["metadatas"]
+    known = {m.get("project") for m in all_meta if m.get("project")}
+
+    valid: list[str] = []
+    unknown: list[str] = []
+    for name in names:
+        (valid if name in known else unknown).append(name)
+
+    if valid:
+        current = read_session()
+        merged = list(dict.fromkeys(current + valid))
+        write_session(merged)
+    else:
+        merged = read_session()
+
+    return {"active_projects": merged, "unknown": unknown}
+
+
+def _data_project_deactivate() -> dict:
+    """Clear the active session. Returns {active_projects: []}."""
+    clear_session()
+    return {"active_projects": []}
+
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 
@@ -232,9 +632,6 @@ def cmd_index(
         )
         copy = True
 
-    collection = get_collection()
-    model = load_model()
-
     expanded = expand_paths(paths)
     if not expanded:
         console.print(
@@ -243,133 +640,65 @@ def cmd_index(
         )
         return
 
-    for file_path in expanded:
-        if not file_path.exists():
-            console.print(f"[yellow][skip][/yellow] not found: {file_path}")
-            continue
+    tasks: dict[str, int] = {}
 
-        if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            console.print(f"[yellow][skip][/yellow] unsupported type: {file_path.name}")
-            continue
-
-        proj = project or default_project(file_path)
-        prefix = doc_id_prefix(file_path)
-        existing = collection.get(where={"source": str(file_path.resolve())})
-
-        if existing["ids"] and not force:
-            console.print(
-                f"[yellow][skip][/yellow] already indexed "
-                f"({len(existing['ids'])} chunks): {file_path.name}"
-            )
-            console.print("       Use [bold]--force[/bold] to re-index.")
-            continue
-
-        if existing["ids"]:
-            collection.delete(ids=existing["ids"])
-            console.print(
-                f"[dim][re-index] removed {len(existing['ids'])} old chunks "
-                f"for {file_path.name}[/dim]"
-            )
-
-        if store:
-            stored_path = store_file(file_path, copy=copy)
-            action = "copied" if copy else "linked"
-            console.print(f"[dim]File {action} → {stored_path}[/dim]")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        def on_progress(done: int, total: int, filename: str) -> None:
+            if filename not in tasks:
+                tasks[filename] = progress.add_task(
+                    f"Embedding [cyan]{filename}[/cyan]", total=total
+                )
+            progress.update(tasks[filename], completed=done, total=total)
 
         try:
-            sections = read_file(file_path)
-        except Exception as exc:
-            console.print(f"[red][error][/red] Could not read {file_path.name}: {exc}")
-            continue
-
-        total_sections = sections[0].total if sections else 0
-        console.print(
-            f"Indexing [bold]{file_path.name}[/bold] ({total_sections} sections) "
-            f"→ project [cyan]{proj}[/cyan]"
-        )
-
-        indexed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        try:
-            source_mtime: float | None = file_path.stat().st_mtime
-        except OSError:
-            source_mtime = None
-
-        try:
-            chunk_texts, chunk_metas = [], []
-            for section in sections:
-                if len(section.text) < MIN_CHARS:
-                    continue
-                for chunk_idx, chunk in enumerate(chunk_text(section.text)):
-                    chunk_texts.append(chunk)
-                    chunk_metas.append(
-                        {
-                            "source": str(file_path.resolve()),
-                            "filename": file_path.name,
-                            "page": section.phys_page,
-                            "page_label": section.page_label,
-                            "total_pages": section.total,
-                            "chunk": chunk_idx,
-                            "project": proj,
-                            "indexed_at": indexed_at,
-                            "source_mtime": source_mtime,
-                            "model": MODEL_NAME,
-                            "chunk_size": CHUNK_SIZE,
-                            "chunk_overlap": CHUNK_OVERLAP,
-                        }
-                    )
-
-            ids, embeddings, documents, metadatas = [], [], [], []
-            embed_gen = model.embed(chunk_texts, batch_size=32)
-
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TaskProgressColumn(),
-                console=console,
-            ) as progress:
-                task = progress.add_task("Embedding", total=len(chunk_texts))
-                for chunk, meta, embedding in zip(chunk_texts, chunk_metas, embed_gen):
-                    ids.append(f"{prefix}_p{meta['page']}_c{meta['chunk']}")
-                    embeddings.append(embedding.tolist())
-                    documents.append(chunk)
-                    metadatas.append(meta)
-                    progress.advance(task)
-
-        except KeyboardInterrupt:
-            console.print(
-                f"\n[red][interrupted][/red] Cleaning up partial index for {file_path.name}..."
+            result = _data_index(
+                paths,
+                force=force,
+                copy=copy,
+                store=store,
+                project=project,
+                on_progress=on_progress,
             )
-            partial = collection.get(where={"source": str(file_path.resolve())})
-            if partial["ids"]:
-                collection.delete(ids=partial["ids"])
-            console.print("[red][interrupted][/red] No partial data left. Re-run to index.")
+        except RuntimeError as exc:
+            console.print(f"\n[red][interrupted][/red] {exc}")
             raise SystemExit(1)
 
-        indexed = len({m["page"] for m in metadatas})
-        skipped = total_sections - indexed
-        skip_note = (
-            f", skipped {skipped} sections shorter than {MIN_CHARS} chars"
-            if skipped > 0
-            else ""
-        )
-        console.print(
-            f"  → [green]{len(ids)} chunks[/green] from "
-            f"{indexed}/{total_sections} sections{skip_note}"
-        )
+    for r in result["results"]:
+        if r["status"] == "skipped":
+            reason = r["reason"] or ""
+            if "already indexed" in reason:
+                console.print(f"[yellow][skip][/yellow] {reason}: {r['filename']}")
+                console.print("       Use [bold]--force[/bold] to re-index.")
+            elif reason == "not found":
+                console.print(f"[yellow][skip][/yellow] not found: {r['path']}")
+            else:
+                console.print(f"[yellow][skip][/yellow] {reason}: {r['filename']}")
+        elif r["status"] == "error":
+            console.print(f"[red][error][/red] Could not read {r['filename']}: {r['reason']}")
+        elif r["status"] == "indexed":
+            if r.get("reindexed"):
+                console.print(f"[dim][re-index] {r['filename']}[/dim]")
+            if r.get("store_action"):
+                console.print(f"[dim]File {r['store_action']}[/dim]")
+            skipped = r["total_sections"] - r["sections_indexed"]
+            skip_note = (
+                f", skipped {skipped} sections shorter than {MIN_CHARS} chars"
+                if skipped > 0
+                else ""
+            )
+            console.print(
+                f"  → [green]{r['chunks_added']} chunks[/green] from "
+                f"{r['sections_indexed']}/{r['total_sections']} sections{skip_note} "
+                f"→ project [cyan]{r['project']}[/cyan]"
+            )
 
-        if ids:
-            batch = 100
-            for i in range(0, len(ids), batch):
-                collection.add(
-                    ids=ids[i : i + batch],
-                    embeddings=embeddings[i : i + batch],
-                    documents=documents[i : i + batch],
-                    metadatas=metadatas[i : i + batch],
-                )
-
-    total = collection.count()
-    console.print(f"\nKnowledge base: [bold]{total} chunks[/bold] total.")
+    console.print(f"\nKnowledge base: [bold]{result['total_chunks']} chunks[/bold] total.")
 
 
 def cmd_search(
@@ -380,67 +709,37 @@ def cmd_search(
     projects: list[str] | None = None,
     full: bool = False,
 ) -> None:
-    collection = get_collection()
-    if collection.count() == 0:
+    if get_collection().count() == 0:
         console.print(
             "[yellow]Knowledge base is empty.[/yellow] Run: [bold]engra index <file.pdf>[/bold]"
         )
         return
 
-    # Resolve active projects: explicit flag(s) override session
-    if projects:
-        active_projects = projects
-    else:
-        active_projects = read_session()
-
+    active_projects = projects if projects is not None else read_session()
     if active_projects:
         console.print(f"[dim]Searching in project(s): {', '.join(active_projects)}[/dim]")
 
-    where = _build_where(active_projects, filename)
+    hits = _data_search(query, top_k=top_k, min_score=min_score, filename=filename, projects=projects)
 
-    model = load_model()
-    query_embedding = next(model.query_embed([query])).tolist()
-
-    query_kwargs: dict = dict(
-        query_embeddings=[query_embedding],
-        n_results=min(top_k * 3 if min_score > 0 else top_k, collection.count()),
-        include=["documents", "metadatas", "distances"],
-    )
-    if where:
-        query_kwargs["where"] = where
-
-    results = collection.query(**query_kwargs)
-
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-    distances = results["distances"][0]
-
-    _warn_stale_from_metas(metas)
+    _warn_stale_from_metas([
+        {"source": h["source"], "indexed_at": h.get("indexed_at"), "source_mtime": h.get("source_mtime")}
+        for h in hits
+    ])
     console.print(f'\nResults for: [bold]"{query}"[/bold]')
     console.rule()
 
-    # Show project prefix when multiple projects are in scope (or global search with mixed results)
-    result_projects = {m.get("project", "") for m in metas}
+    result_projects = {h["project"] for h in hits}
     show_project = len(active_projects) != 1 and len(result_projects) > 1
 
-    shown = 0
-    for text, meta, dist in zip(docs, metas, distances):
-        score = 1.0 - dist
-        if score < min_score:
-            continue
-        shown += 1
-        if shown > top_k:
-            break
+    for i, h in enumerate(hits, 1):
+        page_str = h["page_label"] if h["page_label"] != str(h["page"]) else str(h["page"])
+        chunk_info = f"  chunk {h['chunk']}" if h["chunk"] > 0 else ""
+        phys_info = f"  (phys. {h['page']})" if h["page_label"] != str(h["page"]) else ""
+        file_label = (
+            f"[dim]{h['project']}[/dim] › {h['filename']}" if show_project else h["filename"]
+        )
 
-        doc_label = meta.get("page_label", str(meta["page"]))
-        page_str = doc_label if doc_label != str(meta["page"]) else str(meta["page"])
-        chunk_info = f"  chunk {meta['chunk']}" if meta.get("chunk", 0) > 0 else ""
-        phys_info = f"  (phys. {meta['page']})" if doc_label != str(meta["page"]) else ""
-        if show_project:
-            file_label = f"[dim]{meta.get('project', '')}[/dim] › {meta['filename']}"
-        else:
-            file_label = meta["filename"]
-
+        text = h["text"]
         if full:
             snippet = " ".join(text.split())
         else:
@@ -448,14 +747,14 @@ def cmd_search(
             snippet = normalized[:220] + ("…" if len(normalized) > 220 else "")
 
         console.print(
-            f"[bold cyan][{shown}][/bold cyan] {file_label}  —  "
-            f"p.{page_str}/{meta['total_pages']}{chunk_info}{phys_info}  "
-            f"[dim](score: {score:.3f})[/dim]"
+            f"[bold cyan][{i}][/bold cyan] {file_label}  —  "
+            f"p.{page_str}/{h['total_pages']}{chunk_info}{phys_info}  "
+            f"[dim](score: {h['score']:.3f})[/dim]"
         )
         console.print(f"    [dim]{snippet}[/dim]")
         console.print()
 
-    if shown == 0:
+    if not hits:
         msg = f"No results above score {min_score:.2f}."
         if active_projects:
             msg += f" (searching in: {', '.join(active_projects)})"
@@ -682,8 +981,7 @@ def cmd_get(
     col = get_collection()
 
     # Stale/missing check for this file
-    file_metas = col.get(where={"filename": filename}, include=["metadatas"])
-    file_metas_list: list[dict] = file_metas.get("metadatas") or []
+    file_metas_list: list[dict] = col.get(where={"filename": filename}, include=["metadatas"]).get("metadatas") or []
     if file_metas_list:
         _warn_stale_from_metas([file_metas_list[0]])
 
@@ -692,61 +990,42 @@ def cmd_get(
     nav_mode = next_k is not None or prev_k is not None
 
     if nav_mode:
-        # Find reference (page, chunk) position in sequence
-        ref_page = page_start  # ranges disallowed with nav in main.py
+        ref_page = page_start
         if chunk is None:
             page_seq_idxs = [i for i, (p, _, _) in enumerate(sequence) if p == ref_page]
             if not page_seq_idxs:
                 console.print(f"[yellow]No chunks found for[/yellow] {filename!r} page {ref_page}")
                 return
-            ref_idx = page_seq_idxs[-1] if next_k is not None else page_seq_idxs[0]
+            ref_seq_idx = page_seq_idxs[-1] if next_k is not None else page_seq_idxs[0]
+            ref_chunk = sequence[ref_seq_idx][1]
         else:
-            ref_idx = _find_seq_index(sequence, ref_page, chunk)
-            if ref_idx is None:
+            ref_chunk = chunk
+            if _find_seq_index(sequence, ref_page, chunk) is None:
                 console.print(f"[yellow]Chunk not found:[/yellow] {filename!r} page {ref_page} chunk {chunk}")
                 return
 
-        if next_k is not None:
-            target = range(ref_idx + 1, min(ref_idx + 1 + next_k, len(sequence)))
-        else:
-            target = range(max(0, ref_idx - prev_k), ref_idx)
+        direction = "next" if next_k is not None else "prev"
+        count = next_k if next_k is not None else (prev_k or 1)
+        chunks = _data_get_neighbors(filename, ref_page, ref_chunk, direction=direction, count=count)
 
-        if not target:
+        if not chunks:
             edge = "end" if next_k is not None else "beginning"
             console.print(f"[yellow]Already at the {edge} of {filename!r}[/yellow]")
             return
 
-        for seq_idx in target:
-            tp, tc, _ = sequence[seq_idx]
-            r = col.get(
-                where={"$and": [{"filename": filename}, {"page": tp}, {"chunk": tc}]},
-                include=["documents", "metadatas"],
-            )
-            for meta, text in zip(r.get("metadatas") or [], r.get("documents") or []):
-                _print_chunk(filename, meta, text)
+        for c in chunks:
+            _print_chunk(filename, {"page": c["page"], "page_label": c["page_label"], "chunk": c["chunk_idx"], "source": c["source"]}, c["text"])
 
-        _print_nav_hint(filename, sequence, target.start, target.stop - 1)
+        first_idx = _find_seq_index(sequence, chunks[0]["page"], chunks[0]["chunk_idx"])
+        last_idx = _find_seq_index(sequence, chunks[-1]["page"], chunks[-1]["chunk_idx"])
+        if first_idx is not None and last_idx is not None:
+            _print_nav_hint(filename, sequence, first_idx, last_idx)
         return
 
-    # Normal mode: fetch page range
-    all_pairs: list[tuple[dict, str]] = []
-    missing_pages: list[int] = []
+    # Normal mode
+    chunks = _data_get_chunks(filename, page_start, page_end, chunk=chunk)
 
-    for page in range(page_start, page_end + 1):
-        clauses: list[dict] = [{"filename": filename}, {"page": page}]
-        if chunk is not None:
-            clauses.append({"chunk": chunk})
-        results = col.get(where={"$and": clauses}, include=["documents", "metadatas"])
-        docs: list[str] = results.get("documents") or []
-        metas: list[dict] = results.get("metadatas") or []
-        if not docs:
-            missing_pages.append(page)
-            continue
-        all_pairs.extend(
-            sorted(zip(metas, docs), key=lambda x: (x[0].get("page", page), x[0].get("chunk", 0)))
-        )
-
-    if not all_pairs:
+    if not chunks:
         if single_page:
             msg = f"[yellow]No chunks found for[/yellow] {filename!r} page {page_start}"
             if chunk is not None:
@@ -756,17 +1035,17 @@ def cmd_get(
         console.print(msg)
         return
 
-    for meta, text in all_pairs:
-        _print_chunk(filename, meta, text)
+    for c in chunks:
+        _print_chunk(filename, {"page": c["page"], "page_label": c["page_label"], "chunk": c["chunk_idx"], "source": c["source"]}, c["text"])
 
+    found_pages = {c["page"] for c in chunks}
+    missing_pages = [p for p in range(page_start, page_end + 1) if p not in found_pages]
     if missing_pages:
         console.print(f"[yellow]pages {_format_missing_pages(missing_pages)} not found in index[/yellow]")
 
-    # Navigation hint for single-page fetches
     if single_page and sequence:
-        first_m, last_m = all_pairs[0][0], all_pairs[-1][0]
-        f_idx = _find_seq_index(sequence, first_m.get("page", page_start), first_m.get("chunk", 0))
-        l_idx = _find_seq_index(sequence, last_m.get("page", page_start), last_m.get("chunk", 0))
+        f_idx = _find_seq_index(sequence, chunks[0]["page"], chunks[0]["chunk_idx"])
+        l_idx = _find_seq_index(sequence, chunks[-1]["page"], chunks[-1]["chunk_idx"])
         if f_idx is not None and l_idx is not None:
             _print_nav_hint(filename, sequence, f_idx, l_idx)
 
@@ -778,9 +1057,8 @@ def cmd_info(filename: str | None = None) -> None:
         console.print("[yellow]Knowledge base is empty.[/yellow]")
         return
 
-    all_meta: list[dict] = collection.get(include=["metadatas"])["metadatas"]
-
     if filename:
+        all_meta: list[dict] = collection.get(include=["metadatas"])["metadatas"]
         file_meta = [m for m in all_meta if m.get("filename") == filename]
         if not file_meta:
             console.print(f"[yellow]No indexed file named {filename!r}[/yellow]")
@@ -811,24 +1089,15 @@ def cmd_info(filename: str | None = None) -> None:
             ("Stale", stale_str),
         ]
     else:
-        sample = all_meta[0] if all_meta else {}
-        model = sample.get("model", "unknown")
-        chunk_size = sample.get("chunk_size", "unknown")
-        chunk_overlap = sample.get("chunk_overlap", "unknown")
-        total_files = len({m["source"] for m in all_meta})
-        total_chunks = len(all_meta)
-        total_pages = len({(m["source"], m["page"]) for m in all_meta})
-        indexed_ats = [m["indexed_at"] for m in all_meta if m.get("indexed_at")]
-        last_indexed = max(indexed_ats) if indexed_ats else "unknown"
+        d = _data_info()
         rows = [
             ("Index path", str(DB_DIR)),
-            ("Embedding model", str(model)),
-            ("Chunk size", str(chunk_size)),
-            ("Chunk overlap", str(chunk_overlap)),
-            ("Total files", str(total_files)),
-            ("Total chunks", str(total_chunks)),
-            ("Total pages", str(total_pages)),
-            ("Last indexed", last_indexed),
+            ("Embedding model", str(d["model"])),
+            ("Chunk size", str(d["chunk_size"])),
+            ("Chunk overlap", str(d["chunk_overlap"])),
+            ("Total files", str(d["files"])),
+            ("Total chunks", str(d["total_chunks"])),
+            ("Last indexed", d["last_indexed"]),
         ]
 
     width = max(len(k) for k, _ in rows) + 2
@@ -838,28 +1107,11 @@ def cmd_info(filename: str | None = None) -> None:
 
 
 def cmd_list() -> None:
-    collection = get_collection()
-    if collection.count() == 0:
+    if get_collection().count() == 0:
         console.print("[yellow]Knowledge base is empty.[/yellow]")
         return
 
-    all_meta = collection.get(include=["metadatas"])["metadatas"]
-    files: dict[str, dict] = {}
-    for m in all_meta:
-        src = m["source"]
-        if src not in files:
-            files[src] = {
-                "filename": m["filename"],
-                "project": m.get("project", "—"),
-                "chunks": 0,
-                "pages": set(),
-                "total": m["total_pages"],
-                "indexed_at": m.get("indexed_at"),
-                "source_mtime": m.get("source_mtime"),
-            }
-        files[src]["chunks"] += 1
-        files[src]["pages"].add(m["page"])
-
+    file_list = _data_list_files()
     table = Table(show_header=True, header_style="bold")
     table.add_column("Project", style="cyan")
     table.add_column("File", style="bold")
@@ -868,25 +1120,20 @@ def cmd_list() -> None:
     table.add_column("Stale", justify="center")
     table.add_column("Path", style="dim")
 
-    for src, info in sorted(files.items(), key=lambda x: (x[1]["project"], x[1]["filename"])):
-        status = _stale_status(src, info.get("source_mtime"))
-        stale_cell = {
-            "ok": "[green]ok[/green]",
-            "stale": "[yellow]⚠[/yellow]",
-            "missing": "[red]missing[/red]",
-            "unknown": "[dim]?[/dim]",
-        }[status]
+    stale_cells = {
+        "ok": "[green]ok[/green]",
+        "stale": "[yellow]⚠[/yellow]",
+        "missing": "[red]missing[/red]",
+        "unknown": "[dim]?[/dim]",
+    }
+    for f in file_list:
         table.add_row(
-            info["project"],
-            info["filename"],
-            str(info["chunks"]),
-            str(len(info["pages"])),
-            stale_cell,
-            src,
+            f["project"], f["filename"], str(f["chunks"]),
+            str(f["pages"]), stale_cells[f["stale_status"]], f["source"],
         )
 
     console.print(table)
-    console.print(f"Total chunks in index: [bold]{collection.count()}[/bold]")
+    console.print(f"Total chunks in index: [bold]{get_collection().count()}[/bold]")
 
 
 def cmd_remove(pdf_path: Path) -> None:
@@ -1019,20 +1266,11 @@ def cmd_bookmark_remove(name: str) -> None:
 
 
 def cmd_project_list() -> None:
-    collection = get_collection()
-    if collection.count() == 0:
+    if get_collection().count() == 0:
         console.print("[yellow]Knowledge base is empty.[/yellow]")
         return
 
-    all_meta = collection.get(include=["metadatas"])["metadatas"]
-    projects: dict[str, dict] = {}
-    for m in all_meta:
-        proj = m.get("project", "—")
-        if proj not in projects:
-            projects[proj] = {"chunks": 0, "files": set()}
-        projects[proj]["chunks"] += 1
-        projects[proj]["files"].add(m["filename"])
-
+    projects = _data_list_projects()
     active = read_session()
 
     table = Table(show_header=True, header_style="bold")
@@ -1041,41 +1279,30 @@ def cmd_project_list() -> None:
     table.add_column("Chunks", justify="right")
     table.add_column("Active")
 
-    for name, info in sorted(projects.items()):
-        is_active = "● " if name in active else ""
+    for p in projects:
+        is_active = p["name"] in active
         table.add_row(
-            name,
-            str(len(info["files"])),
-            str(info["chunks"]),
-            f"[green]{is_active}yes[/green]" if name in active else "[dim]no[/dim]",
+            p["name"], str(p["file_count"]), str(p["chunk_count"]),
+            f"[green]● yes[/green]" if is_active else "[dim]no[/dim]",
         )
 
     console.print(table)
 
 
 def cmd_project_activate(names: list[str]) -> None:
-    collection = get_collection()
-    all_meta = collection.get(include=["metadatas"])["metadatas"]
-    known = {m.get("project") for m in all_meta if m.get("project")}
-
-    valid, unknown = [], []
-    for name in names:
-        (valid if name in known else unknown).append(name)
-
-    if unknown:
-        console.print(f"[yellow]Unknown project(s):[/yellow] {', '.join(unknown)}")
+    r = _data_project_activate(names)
+    if r["unknown"]:
+        known = {p["name"] for p in _data_list_projects()}
+        console.print(f"[yellow]Unknown project(s):[/yellow] {', '.join(r['unknown'])}")
         console.print(f"Known projects: {', '.join(sorted(known))}")
-        if not valid:
+        if not r["active_projects"]:
             return
-
-    current = read_session()
-    merged = list(dict.fromkeys(current + valid))  # preserve order, deduplicate
-    write_session(merged)
-    console.print(f"[green]Active projects:[/green] {', '.join(merged)}")
+    if r["active_projects"]:
+        console.print(f"[green]Active projects:[/green] {', '.join(r['active_projects'])}")
 
 
 def cmd_project_deactivate() -> None:
-    clear_session()
+    _data_project_deactivate()
     console.print("[green]Session cleared.[/green] Searching globally.")
 
 
@@ -1137,3 +1364,14 @@ def cmd_project_remove(name: str) -> None:
         updated = [p for p in active if p != name]
         write_session(updated) if updated else clear_session()
         console.print("[dim]Removed from active session.[/dim]")
+
+
+def cmd_mcp() -> None:
+    """Start the MCP stdio server. Requires the 'mcp' optional dependency."""
+    try:
+        from engra.mcp_server import run_mcp_server  # noqa: PLC0415
+    except ImportError as exc:
+        console.print(f"[red]MCP support not installed:[/red] {exc}")
+        console.print("Install with: [bold]pip install 'engra[mcp]'[/bold]")
+        raise SystemExit(1)
+    run_mcp_server()
