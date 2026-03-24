@@ -153,7 +153,7 @@ def run() -> None:
 
     p_bm_save = bm_sub.add_parser("save", help="Save a named search")
     p_bm_save.add_argument("name")
-    p_bm_save.add_argument("--query", required=True, help="Search query to save")
+    p_bm_save.add_argument("query", help="Search query to save")
     p_bm_save.add_argument("--project", default=None, metavar="PROJECT")
     p_bm_save.add_argument("--top", type=int, default=5, metavar="N")
     p_bm_save.add_argument("--min-score", type=float, default=None, metavar="S", dest="min_score")

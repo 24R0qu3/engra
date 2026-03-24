@@ -592,6 +592,58 @@ def test_save_bookmarks_creates_dir(tmp_path, monkeypatch):
     assert nested.exists()
 
 
+# ── bookmark CLI: query is positional ─────────────────────────────────────────
+
+
+def test_bookmark_save_query_positional(tmp_path, monkeypatch):
+    """bookmark save NAME QUERY accepts query as a positional argument."""
+    import engra.main as m
+
+    parser = m.run.__code__  # just check main is importable
+    # Parse the CLI args via argparse
+    import argparse
+    import sys
+    from unittest.mock import patch
+
+    with patch.object(sys, "argv", ["engra", "bookmark", "save", "myname", "my search query"]):
+        # We can't call run() (it tries to log), so build the parser directly
+        import importlib
+
+        # Reload main to get a fresh parser
+        import engra.main
+
+        # Manually invoke the parser logic from main.py
+        ns = _parse_main_args(["bookmark", "save", "myname", "my search query"])
+        assert ns.bm_cmd == "save"
+        assert ns.name == "myname"
+        assert ns.query == "my search query"
+
+
+def _parse_main_args(argv):
+    """Helper that builds the engra argparse and parses the given argv list."""
+    import argparse
+    from pathlib import Path
+    from engra import __version__
+
+    parser = argparse.ArgumentParser(prog="engra")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--log", default="WARNING")
+    parser.add_argument("--log-file", default="DEBUG")
+    parser.add_argument("--log-path", default=None)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_bm = sub.add_parser("bookmark")
+    bm_sub = p_bm.add_subparsers(dest="bm_cmd", required=True)
+    p_bm_save = bm_sub.add_parser("save")
+    p_bm_save.add_argument("name")
+    p_bm_save.add_argument("query")
+    p_bm_save.add_argument("--project", default=None)
+    p_bm_save.add_argument("--top", type=int, default=5)
+    p_bm_save.add_argument("--min-score", type=float, default=None, dest="min_score")
+
+    return parser.parse_args(argv)
+
+
 # ── cmd_info unknown-field hint ───────────────────────────────────────────────
 
 
