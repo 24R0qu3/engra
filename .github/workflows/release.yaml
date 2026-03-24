@@ -31,21 +31,21 @@ jobs:
       - name: Build executable (Linux / macOS)
         if: matrix.platform != 'windows'
         run: |
-          pyinstaller --onefile --console --name engram src/engram/main.py
-          mv dist/engram "dist/engram-${{ github.ref_name }}-${{ matrix.platform }}"
+          pyinstaller --onefile --console --name engra src/engra/main.py
+          mv dist/engra "dist/engra-${{ github.ref_name }}-${{ matrix.platform }}"
 
       - name: Build executable (Windows)
         if: matrix.platform == 'windows'
         run: |
-          pyinstaller --onefile --console --name engram src/engram/main.py
-          mv dist/engram.exe "dist/engram-${{ github.ref_name }}-windows.exe"
+          pyinstaller --onefile --console --name engra src/engra/main.py
+          mv dist/engra.exe "dist/engra-${{ github.ref_name }}-windows.exe"
         shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: engram_${{ github.ref_name }}_${{ matrix.os }}
-          path: dist/engram-${{ github.ref_name }}-*
+          name: engra_${{ github.ref_name }}_${{ matrix.os }}
+          path: dist/engra-${{ github.ref_name }}-*
 
   release:
     needs: build
