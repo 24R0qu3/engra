@@ -462,6 +462,125 @@ def cmd_search(
         console.print(f"[yellow]{msg}[/yellow]")
 
 
+def cmd_ask(
+    question: str,
+    projects: list[str] | None = None,
+    filename: str | None = None,
+    context_chunks: int | None = None,
+) -> None:
+    """Answer a question using retrieved chunks as context (RAG)."""
+    import urllib.error
+    import urllib.request
+
+    cfg = load_config()
+    ask_cfg = cfg.get("ask", {})
+
+    api_base = ask_cfg.get("api_base", "http://localhost:11434/v1").rstrip("/")
+    model_id = ask_cfg.get("model", "llama3")
+    api_key = ask_cfg.get("api_key", "ollama")
+    top_k = context_chunks if context_chunks is not None else int(ask_cfg.get("context_chunks", 5))
+    system_prompt = ask_cfg.get(
+        "system_prompt",
+        "You are a helpful assistant. Answer the question using only the provided context. "
+        "If the context does not contain enough information, say so.",
+    )
+
+    collection = get_collection()
+    if collection.count() == 0:
+        console.print(
+            "[yellow]Knowledge base is empty.[/yellow] Run: [bold]engra index <file>[/bold]"
+        )
+        return
+
+    if projects:
+        active_projects = projects
+    else:
+        active_projects = read_session()
+
+    where = _build_where(active_projects, filename)
+
+    model = load_model()
+    query_embedding = next(model.query_embed([question])).tolist()
+
+    query_kwargs: dict = dict(
+        query_embeddings=[query_embedding],
+        n_results=min(top_k, collection.count()),
+        include=["documents", "metadatas"],
+    )
+    if where:
+        query_kwargs["where"] = where
+
+    results = collection.query(**query_kwargs)
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
+
+    if not docs:
+        console.print("[yellow]No relevant chunks found.[/yellow]")
+        return
+
+    # Build context block
+    context_parts = []
+    for i, (text, meta) in enumerate(zip(docs, metas), 1):
+        label = f"[{i}] {meta['filename']} p.{meta.get('page_label', meta['page'])}"
+        context_parts.append(f"{label}\n{text.strip()}")
+    context_text = "\n\n---\n\n".join(context_parts)
+
+    # Print sources header
+    console.print(f'\n[bold]Question:[/bold] {question}')
+    console.print(f'[dim]Context: {len(docs)} chunk(s) from index[/dim]')
+    console.rule()
+
+    # Call LLM
+    import json as _json
+
+    payload = _json.dumps(
+        {
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"Context:\n\n{context_text}\n\nQuestion: {question}",
+                },
+            ],
+            "stream": False,
+        }
+    ).encode()
+
+    req = urllib.request.Request(
+        f"{api_base}/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            response_data = _json.loads(resp.read())
+        answer = response_data["choices"][0]["message"]["content"]
+    except urllib.error.URLError as exc:
+        console.print(f"[red]LLM request failed:[/red] {exc}")
+        console.print(
+            f"[dim]Ensure your LLM server is running at [bold]{api_base}[/bold] "
+            "or configure [bold]ask.api_base[/bold] in ~/.config/engra/config.toml[/dim]"
+        )
+        return
+    except (KeyError, IndexError, _json.JSONDecodeError) as exc:
+        console.print(f"[red]Unexpected LLM response:[/red] {exc}")
+        return
+
+    console.print(f"\n[bold green]Answer[/bold green] [dim](model: {model_id})[/dim]\n")
+    console.print(answer)
+    console.print()
+    console.rule("Sources")
+    for i, meta in enumerate(metas, 1):
+        page_label = meta.get("page_label", str(meta["page"]))
+        console.print(
+            f"  [{i}] {meta['filename']}  p.{page_label}  "
+            f"[dim](chunk {meta.get('chunk', 0)})[/dim]"
+        )
+
+
 def parse_page_range(page_arg: str) -> tuple[int, int]:
     """Parse a page argument into an inclusive (start, end) range.
 

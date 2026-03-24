@@ -14,6 +14,16 @@ DEFAULTS: dict = {
     "index": {
         "copy": True,  # False = symlink
     },
+    "ask": {
+        "api_base": "http://localhost:11434/v1",
+        "model": "llama3",
+        "api_key": "ollama",
+        "context_chunks": 5,
+        "system_prompt": (
+            "You are a helpful assistant. Answer the question using only the provided context. "
+            "If the context does not contain enough information, say so."
+        ),
+    },
 }
 
 _DEFAULT_TOML = """\
@@ -23,6 +33,13 @@ type = "local"
 
 [index]
 copy = true  # set to false to symlink instead of copying files
+
+[ask]
+# OpenAI-compatible LLM endpoint (default: local Ollama)
+api_base = "http://localhost:11434/v1"
+model = "llama3"
+api_key = "ollama"
+context_chunks = 5
 """
 
 

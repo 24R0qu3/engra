@@ -874,3 +874,102 @@ def test_main_suppresses_ort_warning():
     import engra.main  # noqa: F401 – side-effect: sets env var
 
     assert os.environ.get("ORT_LOGGING_LEVEL") == "3"
+
+
+# ── cmd_ask ────────────────────────────────────────────────────────────────────
+
+
+def _make_ask_collection(docs, metas):
+    from unittest.mock import MagicMock
+
+    col = MagicMock()
+    col.count.return_value = len(docs)
+    col.query.return_value = {"documents": [docs], "metadatas": [metas]}
+    return col
+
+
+def _make_fake_model(embedding=None):
+    from unittest.mock import MagicMock
+    import numpy as np
+
+    model = MagicMock()
+    vec = embedding if embedding is not None else np.zeros(128)
+    model.query_embed.return_value = iter([vec])
+    return model
+
+
+def test_ask_empty_collection(monkeypatch, capsys):
+    import io
+    from rich.console import Console
+    import engra.commands as commands
+
+    col = _make_ask_collection([], [])
+    col.count.return_value = 0
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    buf = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
+    commands.cmd_ask("What is torque?")
+    out = buf.getvalue()
+    assert "empty" in out.lower()
+
+
+def test_ask_llm_success(monkeypatch):
+    import io
+    import json
+    from unittest.mock import patch, MagicMock
+    from rich.console import Console
+    import engra.commands as commands
+
+    docs = ["Torque is a rotational force.", "It is measured in Newton-metres."]
+    metas = [
+        {"filename": "doc.pdf", "page": 1, "page_label": "1", "chunk": 0},
+        {"filename": "doc.pdf", "page": 2, "page_label": "2", "chunk": 0},
+    ]
+    col = _make_ask_collection(docs, metas)
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "load_model", lambda: _make_fake_model())
+    monkeypatch.setattr(commands, "read_session", lambda: [])
+
+    fake_response = json.dumps({
+        "choices": [{"message": {"content": "Torque is a rotational force."}}]
+    }).encode()
+
+    buf = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
+
+    import urllib.request
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.read.return_value = fake_response
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        commands.cmd_ask("What is torque?")
+
+    out = buf.getvalue()
+    assert "Torque" in out
+    assert "Sources" in out
+
+
+def test_ask_llm_connection_error(monkeypatch):
+    import io
+    import urllib.error
+    from unittest.mock import patch
+    from rich.console import Console
+    import engra.commands as commands
+
+    docs = ["Some text"]
+    metas = [{"filename": "doc.pdf", "page": 1, "page_label": "1", "chunk": 0}]
+    col = _make_ask_collection(docs, metas)
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "load_model", lambda: _make_fake_model())
+    monkeypatch.setattr(commands, "read_session", lambda: [])
+
+    buf = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
+
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("refused")):
+        commands.cmd_ask("What is torque?")
+
+    out = buf.getvalue()
+    assert "failed" in out.lower() or "LLM" in out
