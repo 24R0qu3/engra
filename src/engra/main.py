@@ -10,6 +10,7 @@ from pathlib import Path
 
 from engra import __version__
 from engra.commands import (
+    cmd_ask,
     cmd_bookmark_list,
     cmd_bookmark_remove,
     cmd_bookmark_run,
@@ -140,6 +141,32 @@ def run() -> None:
         help="Show per-file stats for a specific file",
     )
 
+    # ask
+    p_ask = sub.add_parser("ask", help="Answer a question using indexed documents (RAG)")
+    p_ask.add_argument("question", help="Question to answer")
+    p_ask.add_argument(
+        "--project",
+        action="append",
+        metavar="PROJECT",
+        dest="projects",
+        default=None,
+        help="Restrict context to this project (repeatable; overrides session)",
+    )
+    p_ask.add_argument("--file", metavar="FILENAME", help="Restrict context to a specific file")
+    p_ask.add_argument(
+        "--chunks",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Number of context chunks to retrieve (default: from config, usually 5)",
+    )
+    p_ask.add_argument(
+        "--all",
+        dest="ask_all",
+        action="store_true",
+        help="Search globally, ignoring active session",
+    )
+
     # list
     sub.add_parser("list", help="List indexed documents")
 
@@ -225,6 +252,13 @@ def run() -> None:
         if page_start != page_end and (args.next is not None or args.prev is not None):
             p_get.error("--next/--prev are not allowed with a page range")
         cmd_get(args.filename, page_start, page_end, chunk=args.chunk, next_k=args.next, prev_k=args.prev)
+    elif args.cmd == "ask":
+        cmd_ask(
+            args.question,
+            projects=args.projects if not args.ask_all else None,
+            filename=args.file,
+            context_chunks=args.chunks,
+        )
     elif args.cmd == "info":
         cmd_info(filename=args.file)
     elif args.cmd == "list":
