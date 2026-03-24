@@ -14,6 +14,7 @@ from engra.commands import (
     _get_chunk_sequence,
     _load_bookmarks,
     _save_bookmarks,
+    _stale_status,
     _stale_warning,
     chunk_text,
     default_project,
@@ -450,6 +451,37 @@ def test_find_seq_index_first():
     assert _find_seq_index(seq, 3, 1) == 0
 
 
+# ── _stale_status ─────────────────────────────────────────────────────────────
+
+
+def test_stale_status_missing():
+    assert _stale_status("/nonexistent/gone.pdf", 1234.0) == "missing"
+
+
+def test_stale_status_ok(tmp_path):
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"data")
+    assert _stale_status(str(f), f.stat().st_mtime) == "ok"
+
+
+def test_stale_status_stale(tmp_path):
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"data")
+    assert _stale_status(str(f), f.stat().st_mtime - 100) == "stale"
+
+
+def test_stale_status_unknown_no_mtime(tmp_path):
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"data")
+    # Pre-feature entry: source_mtime was never stored
+    assert _stale_status(str(f), None) == "unknown"
+
+
+def test_stale_status_missing_no_mtime():
+    # File missing takes priority over no mtime
+    assert _stale_status("/nonexistent/gone.pdf", None) == "missing"
+
+
 # ── _stale_warning ────────────────────────────────────────────────────────────
 
 
@@ -478,10 +510,10 @@ def test_stale_warning_changed_file(tmp_path):
     assert "2026-01-01" in warning
 
 
-def test_stale_warning_no_mtime_stored(tmp_path):
+def test_stale_warning_no_mtime_stored_is_silent(tmp_path):
     f = tmp_path / "doc.pdf"
     f.write_bytes(b"data")
-    # old index entry: no source_mtime stored
+    # Pre-feature index entry: no warning emitted (unknown ≠ stale)
     assert _stale_warning(str(f), None, None) is None
 
 

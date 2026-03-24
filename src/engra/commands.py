@@ -113,24 +113,36 @@ def _build_where(
 # ── Staleness helpers ─────────────────────────────────────────────────────────
 
 
-def _stale_warning(source: str, indexed_at: str | None, source_mtime: float | None) -> str | None:
-    """Return a warning string if the source file is stale or missing, else None.
+def _stale_status(source: str, source_mtime: float | None) -> str:
+    """Return staleness status: 'ok' | 'stale' | 'missing' | 'unknown'.
 
-    Returns None when the mtime check is unavailable (old index entry, OSError).
+    'unknown' means source_mtime was never stored (pre-feature index entry) or
+    the mtime is unavailable (OSError on network paths).
     """
     path = Path(source)
     if not path.exists():
+        return "missing"
+    if source_mtime is None:
+        return "unknown"
+    try:
+        return "ok" if path.stat().st_mtime == source_mtime else "stale"
+    except OSError:
+        return "unknown"
+
+
+def _stale_warning(source: str, indexed_at: str | None, source_mtime: float | None) -> str | None:
+    """Return a warning string for stale or missing files, else None.
+
+    Returns None for 'ok' and 'unknown' — unknown entries are silent in
+    search/get output; cmd_list renders them distinctly via _stale_status.
+    """
+    status = _stale_status(source, source_mtime)
+    if status == "missing":
         return (
             f"⚠  source file no longer exists at {source}. "
-            f"Run: engra remove {path.name} to clean up."
+            f"Run: engra remove {Path(source).name} to clean up."
         )
-    if source_mtime is None:
-        return None  # pre-dates staleness tracking
-    try:
-        current_mtime = path.stat().st_mtime
-    except OSError:
-        return None  # unreliable mtime (e.g. network path)
-    if current_mtime != source_mtime:
+    if status == "stale":
         date_str = (indexed_at or "")[:10] or "unknown"
         return (
             f"⚠  {source} has changed since last indexed ({date_str}). "
@@ -172,17 +184,27 @@ def cmd_index(
             console.print("[yellow]Knowledge base is empty.[/yellow]")
             return
         seen: set[str] = set()
-        found_stale = False
+        found_issue = False
+        unknown_count = 0
         for m in all_meta:
             src = m.get("source", "")
             if not src or src in seen:
                 continue
             seen.add(src)
-            warning = _stale_warning(src, m.get("indexed_at"), m.get("source_mtime"))
-            if warning:
+            status = _stale_status(src, m.get("source_mtime"))
+            if status in ("stale", "missing"):
+                warning = _stale_warning(src, m.get("indexed_at"), m.get("source_mtime"))
                 console.print(f"[yellow]{warning}[/yellow]")
-                found_stale = True
-        if not found_stale:
+                found_issue = True
+            elif status == "unknown":
+                unknown_count += 1
+        if unknown_count:
+            console.print(
+                f"[dim]{unknown_count} file(s) predate staleness tracking "
+                f"— re-index to enable mtime checks.[/dim]"
+            )
+            found_issue = True
+        if not found_issue:
             console.print("[green]All indexed files are up to date.[/green]")
         return
 
@@ -627,8 +649,12 @@ def cmd_info(filename: str | None = None) -> None:
             if source_mtime_val is not None
             else "unknown"
         )
-        stale = _stale_warning(file_meta[0]["source"], file_meta[0].get("indexed_at"), source_mtime_val)
-        stale_str = "[green]ok[/green]" if stale is None else "[yellow]⚠  stale[/yellow]" if "changed" in (stale or "") else "[red]missing[/red]"
+        stale_str = {
+            "ok": "[green]ok[/green]",
+            "stale": "[yellow]⚠  stale[/yellow]",
+            "missing": "[red]missing[/red]",
+            "unknown": "[dim]?  unknown (re-index to populate)[/dim]",
+        }[_stale_status(file_meta[0]["source"], source_mtime_val)]
         rows = [
             ("File", filename),
             ("Source(s)", ", ".join(sorted(sources))),
@@ -696,13 +722,13 @@ def cmd_list() -> None:
     table.add_column("Path", style="dim")
 
     for src, info in sorted(files.items(), key=lambda x: (x[1]["project"], x[1]["filename"])):
-        warning = _stale_warning(src, info.get("indexed_at"), info.get("source_mtime"))
-        if warning is None:
-            stale_cell = "[green]ok[/green]"
-        elif "no longer exists" in warning:
-            stale_cell = "[red]missing[/red]"
-        else:
-            stale_cell = "[yellow]⚠[/yellow]"
+        status = _stale_status(src, info.get("source_mtime"))
+        stale_cell = {
+            "ok": "[green]ok[/green]",
+            "stale": "[yellow]⚠[/yellow]",
+            "missing": "[red]missing[/red]",
+            "unknown": "[dim]?[/dim]",
+        }[status]
         table.add_row(
             info["project"],
             info["filename"],
