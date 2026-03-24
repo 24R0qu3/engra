@@ -10,3 +10,4 @@ build/
 *egg-info/
 .claude
 .venv
+iso11783_*/
