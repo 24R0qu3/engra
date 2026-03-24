@@ -6,7 +6,6 @@ from pathlib import Path
 
 import chromadb
 from chromadb.config import Settings
-from fastembed import TextEmbedding
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -20,6 +19,7 @@ from rich.table import Table
 from engra.config import BOOKMARKS_PATH, load as load_config
 from engra.readers import SUPPORTED_EXTENSIONS, read_file
 from engra.storage import (
+    CACHE_DIR,
     DB_DIR,
     clear_session,
     ensure_dirs,
@@ -50,9 +50,11 @@ def get_collection() -> chromadb.Collection:
     )
 
 
-def load_model() -> TextEmbedding:
+def load_model():
+    from fastembed import TextEmbedding  # noqa: PLC0415 – lazy import avoids ORT load on non-embedding commands
+
     console.print(f"[dim]Loading model '{MODEL_NAME}'...[/dim]")
-    return TextEmbedding(MODEL_NAME)
+    return TextEmbedding(MODEL_NAME, cache_dir=str(CACHE_DIR / "models"))
 
 
 def doc_id_prefix(pdf_path: Path) -> str:

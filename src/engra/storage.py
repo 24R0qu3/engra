@@ -4,9 +4,10 @@ import tomllib
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from platformdirs import user_data_dir
+from platformdirs import user_cache_dir, user_data_dir
 
 DATA_DIR = Path(user_data_dir("engra", appauthor=False))
+CACHE_DIR = Path(user_cache_dir("engra", appauthor=False))
 FILES_DIR = DATA_DIR / "files"
 DB_DIR = DATA_DIR / "db"
 STATE_FILE = DATA_DIR / "state.toml"

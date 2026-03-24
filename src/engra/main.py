@@ -1,3 +1,9 @@
+import os
+import warnings
+
+os.environ.setdefault("ORT_LOGGING_LEVEL", "3")
+warnings.filterwarnings("ignore", category=UserWarning, module="fastembed")
+
 import argparse
 import logging
 from pathlib import Path
