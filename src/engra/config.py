@@ -24,6 +24,16 @@ DEFAULTS: dict = {
             "If the context does not contain enough information, say so."
         ),
     },
+    "autodescribe": {
+        # "openai" = OpenAI-compatible endpoint (Ollama or any compat server, no extra dep)
+        # "claude" = Anthropic native API (requires: pip install 'engra[ai]' + ANTHROPIC_API_KEY)
+        # "disabled" = skip auto-description entirely
+        "backend": "openai",
+        "api_base": "http://localhost:11434/v1",
+        "model": "llama3",
+        "api_key": "ollama",
+        "claude_model": "claude-haiku-4-5-20251001",
+    },
 }
 
 _DEFAULT_TOML = """\
@@ -40,6 +50,14 @@ api_base = "http://localhost:11434/v1"
 model = "llama3"
 api_key = "ollama"
 context_chunks = 5
+
+[autodescribe]
+# backend: "openai" (Ollama/any OpenAI-compat) | "claude" (Anthropic API) | "disabled"
+backend = "openai"
+api_base = "http://localhost:11434/v1"
+model = "llama3"
+api_key = "ollama"
+# claude_model = "claude-haiku-4-5-20251001"  # used when backend = "claude"
 """
 
 

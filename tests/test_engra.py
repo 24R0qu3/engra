@@ -948,7 +948,6 @@ def test_ask_llm_success(monkeypatch):
     buf = io.StringIO()
     monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
 
-
     mock_resp = MagicMock()
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)

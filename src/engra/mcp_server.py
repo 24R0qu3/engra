@@ -31,7 +31,9 @@ from engra.commands import (
     _data_list_files,
     _data_list_projects,
     _data_project_activate,
+    _data_project_autodescribe,
     _data_project_deactivate,
+    _data_project_describe,
     _data_search,
 )
 from engra.config import init as init_config
@@ -133,7 +135,11 @@ async def list_tools() -> list[mcp_types.Tool]:
         ),
         mcp_types.Tool(
             name="engra_list_projects",
-            description="List all projects in the index with file and chunk counts.",
+            description=(
+                "List all projects in the index with file/chunk counts, "
+                "descriptions, and keywords. Call this first to identify which "
+                "project to search in."
+            ),
             inputSchema={"type": "object", "properties": {}},
         ),
         mcp_types.Tool(
@@ -155,7 +161,8 @@ async def list_tools() -> list[mcp_types.Tool]:
             description=(
                 "Index one or more files or directories. "
                 "May take 30+ seconds on first run (model download ~1 GB). "
-                "Returns indexed file count, total chunks, and skipped files with reasons."
+                "Returns indexed file count, total chunks, and skipped files with reasons. "
+                "Automatically generates description and keywords via the configured AI backend."
             ),
             inputSchema={
                 "type": "object",
@@ -171,8 +178,55 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "default": False,
                         "description": "Re-index even if already present",
                     },
+                    "description": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": "User-provided project description",
+                    },
+                    "auto_describe": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Generate AI description and keywords for new projects",
+                    },
                 },
                 "required": ["paths"],
+            },
+        ),
+        mcp_types.Tool(
+            name="engra_project_describe",
+            description="Set the user-provided description and/or keywords for a project.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Project name"},
+                    "description": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": "Human-readable description of the project",
+                    },
+                    "keywords": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "default": None,
+                        "description": "Key terms for this project",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
+        mcp_types.Tool(
+            name="engra_project_autodescribe",
+            description=(
+                "Generate (or regenerate) AI description and keywords for an existing project "
+                "using the configured backend (Ollama or Claude). "
+                "Use this to describe projects that were indexed before auto-description was added."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Project name"},
+                },
+                "required": ["name"],
             },
         ),
         mcp_types.Tool(
@@ -248,7 +302,17 @@ def _dispatch(name: str, args: dict):
             paths=[Path(p) for p in args["paths"]],
             force=args.get("force", False),
             project=args.get("project"),
+            description=args.get("description"),
+            auto_describe=args.get("auto_describe", True),
         )
+    elif name == "engra_project_describe":
+        return _data_project_describe(
+            name=args["name"],
+            description=args.get("description"),
+            keywords=args.get("keywords"),
+        )
+    elif name == "engra_project_autodescribe":
+        return _data_project_autodescribe(name=args["name"])
     elif name == "engra_info":
         return _data_info()
     elif name == "engra_project_activate":

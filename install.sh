@@ -5,15 +5,15 @@
 #   INSTALL_DIR=/usr/local/bin bash install.sh   # custom location (needs sudo)
 set -euo pipefail
 
-REPO="<owner>/engra"
+REPO="24R0qu3/engram"
 BIN_NAME="engra"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # ── Detect platform ───────────────────────────────────────────────────────────
 OS="$(uname -s)"
 case "$OS" in
-  Linux)  PLATFORM="linux"  ;;
-  Darwin) PLATFORM="darwin" ;;
+  Linux)  PLATFORM="linux" ;;
+  Darwin) PLATFORM="macos" ;;
   *)
     echo "Unsupported OS: $OS" >&2
     exit 1
