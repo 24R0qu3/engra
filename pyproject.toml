@@ -36,7 +36,7 @@ where = ["src"]
 version = {attr = "engra.__version__"}
 
 [tool.bumpversion]
-current_version = "1.0.2"
+current_version = "1.0.3"
 commit = true
 tag = true
 tag_name = "v{new_version}"
