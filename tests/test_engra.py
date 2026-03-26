@@ -1302,3 +1302,100 @@ def test_cmd_export_numpy_embeddings_serialized_as_floats(monkeypatch, tmp_path)
         emb = chunk["embedding"]
         assert isinstance(emb, list), "embedding must be a list, not a string or numpy array"
         assert all(isinstance(v, float) for v in emb), "embedding values must be floats"
+
+
+def test_cmd_export_includes_project_metadata(monkeypatch, tmp_path):
+    """Exported manifest must include description, keywords, and auto-description fields."""
+    import io
+    import json
+    import tarfile
+    from unittest.mock import MagicMock
+
+    from rich.console import Console
+
+    import engra.commands as commands
+
+    col = _make_export_collection()
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "FILES_DIR", tmp_path)
+    monkeypatch.setattr(commands, "console", Console(file=io.StringIO(), highlight=False))
+
+    project_meta = {
+        "description": "A test project",
+        "keywords": ["foo", "bar"],
+        "auto_description": "Auto-generated description",
+        "auto_keywords": ["auto1", "auto2"],
+    }
+    monkeypatch.setattr(commands, "read_projects", lambda: {"testproject": project_meta})
+
+    out_path = tmp_path / "testproject.engra.tar.gz"
+    commands.cmd_export("testproject", output_path=out_path)
+
+    with tarfile.open(out_path, "r:gz") as tf:
+        manifest = json.load(tf.extractfile("manifest.json"))
+
+    assert manifest["project_meta"] == project_meta
+
+
+def test_data_import_restores_project_metadata(monkeypatch, tmp_path):
+    """Importing an archive must restore description and keywords via update_project_meta."""
+    import io
+    import json
+    import tarfile
+    from unittest.mock import MagicMock, call
+
+    import engra.commands as commands
+
+    project_meta = {
+        "description": "Restored description",
+        "keywords": ["k1", "k2"],
+        "auto_description": "",
+        "auto_keywords": [],
+    }
+    chunks = [
+        {
+            "id": "id1",
+            "embedding": [0.1, 0.2],
+            "document": "hello",
+            "metadata": {"filename": "a.pdf", "page": 1, "project": "p"},
+        }
+    ]
+    manifest = {
+        "engra_export_version": commands.EXPORT_FORMAT_VERSION,
+        "model": commands.MODEL_NAME,
+        "project": "p",
+        "exported_at": "2026-01-01T00:00:00",
+        "chunk_count": 1,
+        "file_count": 0,
+        "project_meta": project_meta,
+    }
+    arc = tmp_path / "p.engra.tar.gz"
+    with tarfile.open(arc, "w:gz") as tf:
+        for name, obj in [("manifest.json", manifest), ("chunks.json", chunks)]:
+            data = json.dumps(obj).encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+
+    col = MagicMock()
+    col.get.return_value = {"ids": []}
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+
+    recorded_meta: list[dict] = []
+
+    def fake_update_project_meta(name, **kwargs):
+        recorded_meta.append({"name": name, **kwargs})
+
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "FILES_DIR", files_dir)
+    monkeypatch.setattr(commands, "ensure_dirs", lambda: None)
+    monkeypatch.setattr("engra.storage.ensure_dirs", lambda: None)
+    monkeypatch.setattr(commands, "update_project_meta", fake_update_project_meta)
+
+    commands._data_import(arc)
+
+    assert len(recorded_meta) == 1
+    assert recorded_meta[0]["name"] == "p"
+    assert recorded_meta[0]["description"] == "Restored description"
+    assert recorded_meta[0]["keywords"] == ["k1", "k2"]

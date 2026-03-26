@@ -794,7 +794,7 @@ def _data_project_deactivate() -> dict:
     return {"active_projects": []}
 
 
-EXPORT_FORMAT_VERSION = 1
+EXPORT_FORMAT_VERSION = 2
 _EXPORT_BATCH = 500  # max ids per collection.add() call
 
 
@@ -833,11 +833,14 @@ def _data_export(project: str) -> dict:
             if candidate.exists():
                 file_paths.append(candidate)
 
+    project_meta = read_projects().get(project, {})
+
     return {
         "project": project,
         "chunk_count": len(chunks),
         "chunks": chunks,
         "file_paths": file_paths,
+        "project_meta": project_meta,
     }
 
 
@@ -890,6 +893,11 @@ def _data_import(archive_path: Path, overwrite: bool = False) -> dict:
                 documents=[c["document"] for c in batch],
                 metadatas=[c["metadata"] for c in batch],
             )
+
+        # Restore project metadata (description, keywords, etc.)
+        project_meta: dict = manifest.get("project_meta", {})
+        if project_meta:
+            update_project_meta(project, **project_meta)
 
         # Restore files
         ensure_dirs()
@@ -1803,6 +1811,7 @@ def cmd_export(project: str, output_path: Path | None = None) -> None:
         "exported_at": datetime.datetime.now().isoformat(),
         "chunk_count": data["chunk_count"],
         "file_count": len(data["file_paths"]),
+        "project_meta": data["project_meta"],
     }
 
     with tarfile.open(output_path, "w:gz") as tf:
