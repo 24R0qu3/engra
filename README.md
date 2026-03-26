@@ -6,6 +6,12 @@ Local-first semantic search over your documents. Index PDFs once, search them in
 
 ## Installation
 
+> **What's included in the pre-built binary:** core search/index, `engra ask`, and MCP server (`engra mcp`).
+> GPU acceleration always requires a source install (see below).
+> Claude auto-description (`engra[ai]`) also requires a source install.
+
+---
+
 ### Linux — one-liner (pre-built binary)
 
 ```bash
@@ -46,7 +52,7 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile && source ~/.bash_profile
 ```
 
-> **Note:** macOS may show a security warning on first run. To allow it:
+> **Security note:** macOS may block the binary on first run. To allow it:
 > ```bash
 > xattr -d com.apple.quarantine ~/.local/bin/engra
 > ```
@@ -71,22 +77,24 @@ $env:INSTALL_DIR = "C:\Tools"; irm https://raw.githubusercontent.com/24R0qu3/eng
 
 ---
 
-### From source with pipx (all platforms)
+### From source with pipx — GPU / Claude support (all platforms)
 
-Requires Python 3.11+ and [pipx](https://pipx.pypa.io).
+Use this if you need GPU acceleration or Claude auto-description. Requires Python 3.11+ and [pipx](https://pipx.pypa.io).
 
 ```bash
 git clone https://github.com/24R0qu3/engram.git
 cd engram
-pipx install .                         # CPU (default)
-pipx install ".[gpu]"                  # GPU — replaces fastembed with fastembed-gpu (CUDA ≥ 7.0)
+
+pipx install .                         # CPU, no MCP
+pipx install ".[mcp]"                  # CPU + MCP server
+pipx install ".[mcp,gpu]"              # GPU + MCP (CUDA ≥ 7.0 required)
 ```
 
-To add optional features after installing:
+To add optional features to an existing pipx install:
 
 ```bash
-pipx inject engra mcp                  # MCP server support
-pipx inject engra anthropic            # Claude auto-description (requires ANTHROPIC_API_KEY)
+pipx inject engra mcp                  # add MCP server support
+pipx inject engra anthropic            # add Claude auto-description (needs ANTHROPIC_API_KEY)
 ```
 
 ---
@@ -104,10 +112,11 @@ source .venv/bin/activate
 # Windows (PowerShell)
 .venv\Scripts\Activate.ps1
 
-pip install -e .                       # CPU (default)
-pip install -e ".[gpu]"                # GPU support
-pip install -e ".[mcp]"               # MCP server support
-pip install -e ".[ai]"                # Claude auto-description
+pip install -e .                       # CPU core only
+pip install -e ".[mcp]"               # + MCP server
+pip install -e ".[gpu]"               # + GPU (replaces fastembed; CUDA ≥ 7.0)
+pip install -e ".[ai]"                # + Claude auto-description
+pip install -e ".[mcp,ai]"            # combine extras as needed
 ```
 
 ---
