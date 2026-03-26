@@ -6,18 +6,117 @@ Local-first semantic search over your documents. Index PDFs once, search them in
 
 ## Installation
 
-### From source (recommended for now)
+### Linux — one-liner (pre-built binary)
 
 ```bash
-pipx install .                        # CPU
-pipx install ".[gpu]"                 # GPU (replaces fastembed with fastembed-gpu)
+curl -fsSL https://raw.githubusercontent.com/24R0qu3/engram/main/install.sh | bash
 ```
 
-Or with pip into a venv:
+Installs to `~/.local/bin/engra`. If that directory isn't in your PATH yet:
 
 ```bash
-pip install -e .
-pip install -e ".[gpu]"               # for GPU support
+# bash / zsh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# fish
+fish_add_path ~/.local/bin
+```
+
+To install to a system-wide location (requires sudo):
+
+```bash
+INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/24R0qu3/engram/main/install.sh | sudo bash
+```
+
+---
+
+### macOS — one-liner (pre-built binary)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/24R0qu3/engram/main/install.sh | bash
+```
+
+Installs to `~/.local/bin/engra`. Add to PATH if needed:
+
+```bash
+# zsh (default on macOS)
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+
+# bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile && source ~/.bash_profile
+```
+
+> **Note:** macOS may show a security warning on first run. To allow it:
+> ```bash
+> xattr -d com.apple.quarantine ~/.local/bin/engra
+> ```
+
+---
+
+### Windows — one-liner (pre-built binary, PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/24R0qu3/engram/main/install.ps1 | iex
+```
+
+Installs `engra.exe` to `%LOCALAPPDATA%\Programs\engra\` and adds it to your user PATH automatically. Restart your terminal after installation.
+
+To install to a custom location:
+
+```powershell
+$env:INSTALL_DIR = "C:\Tools"; irm https://raw.githubusercontent.com/24R0qu3/engram/main/install.ps1 | iex
+```
+
+> **Note:** Symlinks (`--link`) require Developer Mode or Admin privileges on Windows. engra falls back to copying automatically.
+
+---
+
+### From source with pipx (all platforms)
+
+Requires Python 3.11+ and [pipx](https://pipx.pypa.io).
+
+```bash
+git clone https://github.com/24R0qu3/engram.git
+cd engram
+pipx install .                         # CPU (default)
+pipx install ".[gpu]"                  # GPU — replaces fastembed with fastembed-gpu (CUDA ≥ 7.0)
+```
+
+To add optional features after installing:
+
+```bash
+pipx inject engra mcp                  # MCP server support
+pipx inject engra anthropic            # Claude auto-description (requires ANTHROPIC_API_KEY)
+```
+
+---
+
+### From source with pip (all platforms)
+
+```bash
+git clone https://github.com/24R0qu3/engram.git
+cd engram
+python -m venv .venv
+
+# Linux / macOS
+source .venv/bin/activate
+
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+
+pip install -e .                       # CPU (default)
+pip install -e ".[gpu]"                # GPU support
+pip install -e ".[mcp]"               # MCP server support
+pip install -e ".[ai]"                # Claude auto-description
+```
+
+---
+
+### Verify installation
+
+```bash
+engra --version
+engra --help
 ```
 
 ## Quick start
@@ -36,6 +135,9 @@ engra index ./docs/                           # index all PDFs in a directory
 engra index report.pdf --force                # re-index even if already present
 engra index report.pdf --link                 # symlink instead of copying the file
 engra index report.pdf --no-store             # index without storing a copy
+engra index report.pdf --description "..."    # set a human-readable project description
+engra index report.pdf --no-autodescribe      # skip AI auto-description generation
+engra index --check                           # report stale or missing source files
 ```
 
 ## Searching
@@ -61,9 +163,14 @@ engra project deactivate                      # clear session, back to global se
 engra project active                          # show currently active project(s)
 
 # Manage
-engra project list                            # all projects with file/chunk counts
+engra project list                            # all projects with descriptions and keywords
 engra project rename iso-std iso11783         # rename across all indexed chunks
 engra project remove iso-std                  # remove project from index
+
+# Descriptions and keywords
+engra project describe iso-std --description "ISO 11783-6 Virtual Terminal spec"
+engra project describe iso-std --keywords ISOBUS VT CAN agriculture
+engra project autodescribe iso-std            # generate description + keywords via local LLM
 ```
 
 Once a project is active, searches are automatically scoped to it:
@@ -113,9 +220,22 @@ Configure the LLM endpoint in `~/.config/engra/config.toml`:
 
 ```toml
 [ask]
-base_url = "http://localhost:11434/v1"   # Ollama default
+api_base = "http://localhost:11434/v1"   # Ollama default
 model = "llama3"
+api_key = "ollama"
 context_chunks = 5
+```
+
+## Export and import
+
+Move projects between machines or share them without re-embedding:
+
+```bash
+engra export iso-std                          # → iso-std.engra.tar.gz
+engra export iso-std -o /tmp/backup.tar.gz   # custom output path
+engra import iso-std.engra.tar.gz            # hard import (re-uses embeddings)
+engra import ./docs/ --soft --project iso-std # soft import: index dir with symlinks
+engra import archive.tar.gz --overwrite       # replace existing project data
 ```
 
 ## MCP server
@@ -158,6 +278,7 @@ engra remove ./docs/report.pdf                # remove by full path
 | Index (chromadb) | `~/.local/share/engra/db/` |
 | Stored file copies | `~/.local/share/engra/files/` |
 | Session state | `~/.local/share/engra/state.toml` |
+| Project metadata | `~/.local/share/engra/projects.json` |
 | Config | `~/.config/engra/config.toml` |
 | Model cache | `~/.cache/engra/models/` |
 | Logs | `~/.local/state/engra/log/engra.log` |
@@ -173,6 +294,22 @@ type = "local"
 
 [index]
 copy = true   # set to false to symlink instead of copying files
+
+[ask]
+# OpenAI-compatible endpoint used by `engra ask` (default: local Ollama)
+api_base = "http://localhost:11434/v1"
+model = "llama3"
+api_key = "ollama"
+context_chunks = 5
+
+[autodescribe]
+# Generates description + keywords when indexing new projects
+# backend: "openai" (Ollama/any OpenAI-compat) | "claude" (needs engra[ai] + ANTHROPIC_API_KEY) | "disabled"
+backend = "openai"
+api_base = "http://localhost:11434/v1"
+model = "llama3"
+api_key = "ollama"
+# claude_model = "claude-haiku-4-5-20251001"   # used when backend = "claude"
 ```
 
 ## GPU support

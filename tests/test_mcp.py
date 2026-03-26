@@ -495,7 +495,7 @@ def _import_mcp_server():
     return ms
 
 
-def test_mcp_list_tools_returns_all_nine():
+def test_mcp_list_tools_returns_all_eleven():
     import asyncio
 
     ms = _import_mcp_server()
@@ -511,6 +511,8 @@ def test_mcp_list_tools_returns_all_nine():
         "engra_info",
         "engra_project_activate",
         "engra_project_deactivate",
+        "engra_project_describe",
+        "engra_project_autodescribe",
     }
     assert names == expected
 

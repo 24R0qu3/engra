@@ -26,9 +26,13 @@ from engra.storage import (
     FILES_DIR,
     clear_session,
     ensure_dirs,
+    read_projects,
     read_session,
     remove_file,
+    remove_project_meta,
+    rename_project_meta,
     store_file,
+    update_project_meta,
     write_session,
 )
 
@@ -39,6 +43,121 @@ MODEL_NAME = "intfloat/multilingual-e5-large"
 MIN_CHARS = 80
 CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
+
+AUTO_DESCRIBE_SAMPLE_CHUNKS = 5
+AUTO_DESCRIBE_MAX_CHARS = 4000
+
+
+def _autodescribe_prompt(project: str, sample: str) -> str:
+    return (
+        f"Analyze these excerpts from a document collection called '{project}'.\n"
+        "Return ONLY a JSON object (no markdown, no code fences, no explanation):\n"
+        '{"description": "<one sentence, max 25 words, factual>", '
+        '"keywords": ["<5 to 10 specific key terms or phrases>"]}\n\n'
+        f"Excerpts:\n{sample}"
+    )
+
+
+def _parse_autodescribe_response(text: str) -> tuple[str, list[str]] | None:
+    """Extract (description, keywords) from an LLM JSON response."""
+    import json as _json
+    import re
+
+    # Strip markdown code fences if present
+    text = re.sub(r"```[a-z]*\n?", "", text).strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        data = _json.loads(match.group())
+        desc = str(data.get("description", "")).strip()
+        kws = [str(k).strip() for k in data.get("keywords", []) if str(k).strip()]
+        if desc or kws:
+            return desc, kws
+    except Exception:
+        pass
+    return None
+
+
+def _auto_describe_openai(prompt: str, cfg: dict) -> tuple[str, list[str]] | None:
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    api_base = cfg.get("api_base", "http://localhost:11434/v1").rstrip("/")
+    model_id = cfg.get("model", "llama3")
+    api_key = cfg.get("api_key", "ollama")
+
+    payload = _json.dumps(
+        {
+            "model": model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "temperature": 0.3,
+            "think": False,  # disable reasoning chain for thinking models (e.g. qwen3.5)
+        }
+    ).encode()
+
+    req = urllib.request.Request(
+        f"{api_base}/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = _json.loads(resp.read())
+        msg = data["choices"][0]["message"]
+        # Reasoning models (e.g. qwen3.5) may return content in "reasoning" when content is empty
+        text = msg.get("content") or msg.get("reasoning") or ""
+        return _parse_autodescribe_response(text)
+    except Exception:
+        logger.warning("Auto-description via OpenAI-compatible endpoint failed")
+        return None
+
+
+def _auto_describe_claude(prompt: str, cfg: dict) -> tuple[str, list[str]] | None:
+    import os
+
+    try:
+        import anthropic
+    except ImportError:
+        logger.warning("Claude auto-description requires: pip install 'engra[ai]'")
+        return None
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.warning("ANTHROPIC_API_KEY not set; skipping auto-description")
+        return None
+
+    model_id = cfg.get("claude_model", "claude-haiku-4-5-20251001")
+    try:
+        client = anthropic.Anthropic()
+        msg = client.messages.create(
+            model=model_id,
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return _parse_autodescribe_response(msg.content[0].text)
+    except Exception:
+        logger.warning("Claude auto-description failed")
+        return None
+
+
+def _auto_describe(project: str, chunks: list[str]) -> tuple[str, list[str]] | None:
+    """Generate (description, keywords) using the configured backend. Returns None on failure."""
+    cfg = load_config()
+    ad_cfg = cfg.get("autodescribe", {})
+    backend = ad_cfg.get("backend", "openai")
+
+    if backend == "disabled" or not chunks:
+        return None
+
+    sample = "\n\n---\n\n".join(chunks[:AUTO_DESCRIBE_SAMPLE_CHUNKS])[:AUTO_DESCRIBE_MAX_CHARS]
+    prompt = _autodescribe_prompt(project, sample)
+
+    if backend == "claude":
+        return _auto_describe_claude(prompt, ad_cfg)
+    return _auto_describe_openai(prompt, ad_cfg)
 
 
 def get_collection() -> chromadb.Collection:
@@ -192,6 +311,8 @@ def _data_index(
     copy: bool = True,
     store: bool = True,
     project: str | None = None,
+    description: str | None = None,
+    auto_describe: bool = True,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> dict:
     """Index files. Returns {total_chunks, results: [{path, filename, status, ...}]}.
@@ -204,7 +325,12 @@ def _data_index(
     model = load_model()
     expanded = expand_paths(paths)
 
+    # Snapshot which projects already have metadata before this run
+    existing_project_names = set(read_projects().keys())
+
     results: list[dict] = []
+    # Collect sample chunk texts per project for auto-description
+    project_sample_chunks: dict[str, list[str]] = {}
 
     for file_path in expanded:
         entry: dict = {"path": str(file_path), "filename": file_path.name}
@@ -330,6 +456,30 @@ def _data_index(
                 "store_action": store_action,
             }
         )
+
+        # Accumulate sample chunks for auto-description
+        samples = project_sample_chunks.setdefault(proj, [])
+        need = AUTO_DESCRIBE_SAMPLE_CHUNKS - len(samples)
+        if need > 0 and chunk_texts:
+            samples.extend(chunk_texts[:need])
+
+    # ── Post-indexing: save user description and generate auto-description ──────
+    indexed_projects = {r["project"] for r in results if r.get("status") == "indexed"}
+
+    if description:
+        # If a project was named explicitly, always update even if nothing new was indexed
+        targets = {project} if project else indexed_projects
+        for proj_name in targets:
+            update_project_meta(proj_name, description=description)
+
+    if auto_describe and project_sample_chunks:
+        for proj_name, chunks in project_sample_chunks.items():
+            is_new = proj_name not in existing_project_names
+            if is_new or force:
+                result_ad = _auto_describe(proj_name, chunks)
+                if result_ad:
+                    desc_ad, kws_ad = result_ad
+                    update_project_meta(proj_name, auto_description=desc_ad, auto_keywords=kws_ad)
 
     return {"total_chunks": collection.count(), "results": results}
 
@@ -485,7 +635,7 @@ def _data_get_neighbors(
 
 
 def _data_list_projects() -> list[dict]:
-    """Return per-project stats. Returns [] when index is empty."""
+    """Return per-project stats with descriptions and keywords. Returns [] when empty."""
     collection = get_collection()
     if collection.count() == 0:
         return []
@@ -499,10 +649,55 @@ def _data_list_projects() -> list[dict]:
         projects[proj]["chunks"] += 1
         projects[proj]["files"].add(m["filename"])
 
+    stored = read_projects()
     return [
-        {"name": name, "file_count": len(info["files"]), "chunk_count": info["chunks"]}
+        {
+            "name": name,
+            "file_count": len(info["files"]),
+            "chunk_count": info["chunks"],
+            "description": stored.get(name, {}).get("description", ""),
+            "auto_description": stored.get(name, {}).get("auto_description", ""),
+            "keywords": stored.get(name, {}).get("keywords", []),
+            "auto_keywords": stored.get(name, {}).get("auto_keywords", []),
+        }
         for name, info in sorted(projects.items())
     ]
+
+
+def _data_project_describe(
+    name: str,
+    description: str | None = None,
+    keywords: list[str] | None = None,
+) -> dict:
+    """Set user-provided description and/or keywords for a project."""
+    known = {p["name"] for p in _data_list_projects()}
+    if name not in known:
+        raise ValueError(f"Project not found: {name!r}")
+    kwargs: dict = {}
+    if description is not None:
+        kwargs["description"] = description
+    if keywords is not None:
+        kwargs["keywords"] = keywords
+    if kwargs:
+        update_project_meta(name, **kwargs)
+    return {"name": name, **kwargs}
+
+
+def _data_project_autodescribe(name: str) -> dict:
+    """Generate (or regenerate) auto_description and auto_keywords for an existing project."""
+    collection = get_collection()
+    existing = collection.get(where={"project": name}, include=["documents"])
+    if not existing["ids"]:
+        raise ValueError(f"Project not found: {name!r}")
+
+    chunks = existing["documents"][:AUTO_DESCRIBE_SAMPLE_CHUNKS]
+    result = _auto_describe(name, chunks)
+    if result is None:
+        return {"name": name, "error": "Auto-description failed or is disabled (check config)"}
+
+    desc, kws = result
+    update_project_meta(name, auto_description=desc, auto_keywords=kws)
+    return {"name": name, "auto_description": desc, "auto_keywords": kws}
 
 
 def _data_list_files(project: str | None = None) -> list[dict]:
@@ -720,6 +915,8 @@ def cmd_index(
     copy: bool | None = None,
     store: bool = True,
     project: str | None = None,
+    description: str | None = None,
+    auto_describe: bool = True,
     check: bool = False,
 ) -> None:
     cfg = load_config()
@@ -797,6 +994,8 @@ def cmd_index(
                 copy=copy,
                 store=store,
                 project=project,
+                description=description,
+                auto_describe=auto_describe,
                 on_progress=on_progress,
             )
         except RuntimeError as exc:
@@ -1448,14 +1647,22 @@ def cmd_project_list() -> None:
     table.add_column("Files", justify="right")
     table.add_column("Chunks", justify="right")
     table.add_column("Active")
+    table.add_column("Description", max_width=45, overflow="fold")
+    table.add_column("Keywords", max_width=35, overflow="fold")
 
     for p in projects:
         is_active = p["name"] in active
+        # Prefer user-set values, fall back to AI-generated
+        desc = p["description"] or p["auto_description"]
+        kws = p["keywords"] or p["auto_keywords"]
+        kw_str = ", ".join(kws) if kws else ""
         table.add_row(
             p["name"],
             str(p["file_count"]),
             str(p["chunk_count"]),
             "[green]● yes[/green]" if is_active else "[dim]no[/dim]",
+            f"[dim]{desc}[/dim]" if desc else "",
+            f"[dim]{kw_str}[/dim]" if kw_str else "",
         )
 
     console.print(table)
@@ -1500,6 +1707,8 @@ def cmd_project_rename(old_name: str, new_name: str) -> None:
         f"({len(existing['ids'])} chunks updated)"
     )
 
+    rename_project_meta(old_name, new_name)
+
     # Update session if old name was active
     active = read_session()
     if old_name in active:
@@ -1530,12 +1739,45 @@ def cmd_project_remove(name: str) -> None:
         f"{len(existing['ids'])} chunks, {len(filenames)} file(s)"
     )
 
+    remove_project_meta(name)
+
     # Remove from session if active
     active = read_session()
     if name in active:
         updated = [p for p in active if p != name]
         write_session(updated) if updated else clear_session()
         console.print("[dim]Removed from active session.[/dim]")
+
+
+def cmd_project_describe(
+    name: str,
+    description: str | None = None,
+    keywords: list[str] | None = None,
+) -> None:
+    try:
+        _data_project_describe(name, description=description, keywords=keywords)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        return
+    if description is not None:
+        console.print(f"[green]Description set[/green] for '{name}'.")
+    if keywords is not None:
+        console.print(f"[green]Keywords set[/green] for '{name}': {', '.join(keywords)}")
+
+
+def cmd_project_autodescribe(name: str) -> None:
+    console.print(f"[dim]Generating auto-description for '{name}'...[/dim]")
+    try:
+        result = _data_project_autodescribe(name)
+    except ValueError as e:
+        console.print(f"[red]Error:[/red] {e}")
+        return
+    if "error" in result:
+        console.print(f"[yellow]{result['error']}[/yellow]")
+        return
+    console.print(f"[green]Auto-description:[/green] {result['auto_description']}")
+    if result["auto_keywords"]:
+        console.print(f"[green]Keywords:[/green] {', '.join(result['auto_keywords'])}")
 
 
 def cmd_export(project: str, output_path: Path | None = None) -> None:

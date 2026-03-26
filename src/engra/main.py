@@ -25,7 +25,9 @@ from engra.commands import (  # noqa: E402
     cmd_mcp,
     cmd_project_activate,
     cmd_project_active,
+    cmd_project_autodescribe,
     cmd_project_deactivate,
+    cmd_project_describe,
     cmd_project_list,
     cmd_project_remove,
     cmd_project_rename,
@@ -66,6 +68,13 @@ def run() -> None:
     )
     p_index.add_argument("--force", action="store_true", help="Re-index even if already present")
     p_index.add_argument("--project", default=None, help="Project name (default: parent dir name)")
+    p_index.add_argument("--description", default=None, help="Short description for the project")
+    p_index.add_argument(
+        "--no-autodescribe",
+        action="store_true",
+        dest="no_autodescribe",
+        help="Skip AI auto-description generation",
+    )
     p_index.add_argument(
         "--check",
         action="store_true",
@@ -233,6 +242,22 @@ def run() -> None:
     p_proj_remove = proj_sub.add_parser("remove", help="Remove a project from the index")
     p_proj_remove.add_argument("name")
 
+    p_describe = proj_sub.add_parser("describe", help="Set description and/or keywords")
+    p_describe.add_argument("name", metavar="PROJECT")
+    p_describe.add_argument("--description", default=None, help="Short description")
+    p_describe.add_argument(
+        "--keywords",
+        nargs="+",
+        metavar="KEYWORD",
+        default=None,
+        help="Space-separated keywords",
+    )
+
+    p_autodescribe = proj_sub.add_parser(
+        "autodescribe", help="Generate AI description and keywords"
+    )
+    p_autodescribe.add_argument("name", metavar="PROJECT")
+
     # export
     p_export = sub.add_parser("export", help="Export a project to a portable archive")
     p_export.add_argument("project", metavar="PROJECT", help="Project name to export")
@@ -291,6 +316,8 @@ def run() -> None:
                 copy=copy,
                 store=not args.no_store,
                 project=args.project,
+                description=args.description,
+                auto_describe=not args.no_autodescribe,
             )
     elif args.cmd == "search":
         cmd_search(
@@ -381,6 +408,14 @@ def run() -> None:
             cmd_project_rename(args.old_name, args.new_name)
         elif args.proj_cmd == "remove":
             cmd_project_remove(args.name)
+        elif args.proj_cmd == "describe":
+            cmd_project_describe(
+                args.name,
+                description=args.description,
+                keywords=args.keywords,
+            )
+        elif args.proj_cmd == "autodescribe":
+            cmd_project_autodescribe(args.name)
 
 
 if __name__ == "__main__":

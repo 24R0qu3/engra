@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo    = "<owner>/engra"
+$Repo    = "24R0qu3/engram"
 $BinName = "engra"
 
 if (-not $InstallDir) {

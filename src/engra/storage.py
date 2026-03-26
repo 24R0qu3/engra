@@ -11,6 +11,7 @@ CACHE_DIR = Path(user_cache_dir("engra", appauthor=False))
 FILES_DIR = DATA_DIR / "files"
 DB_DIR = DATA_DIR / "db"
 STATE_FILE = DATA_DIR / "state.toml"
+PROJECTS_FILE = DATA_DIR / "projects.json"
 
 SESSION_TTL_HOURS = 8
 
@@ -72,3 +73,45 @@ def write_session(projects: list[str]) -> None:
 def clear_session() -> None:
     if STATE_FILE.exists():
         STATE_FILE.unlink()
+
+
+# ── Project metadata ───────────────────────────────────────────────────────────
+
+
+def read_projects() -> dict[str, dict]:
+    """Return {project_name: {description, auto_description, keywords, auto_keywords}}."""
+    if not PROJECTS_FILE.exists():
+        return {}
+    try:
+        return json.loads(PROJECTS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def write_projects(data: dict[str, dict]) -> None:
+    ensure_dirs()
+    PROJECTS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def update_project_meta(name: str, **kwargs) -> None:
+    """Merge non-None kwargs into the named project's metadata entry."""
+    data = read_projects()
+    entry = data.setdefault(name, {})
+    for k, v in kwargs.items():
+        if v is not None:
+            entry[k] = v
+    write_projects(data)
+
+
+def rename_project_meta(old: str, new: str) -> None:
+    data = read_projects()
+    if old in data:
+        data[new] = data.pop(old)
+        write_projects(data)
+
+
+def remove_project_meta(name: str) -> None:
+    data = read_projects()
+    if name in data:
+        data.pop(name)
+        write_projects(data)
