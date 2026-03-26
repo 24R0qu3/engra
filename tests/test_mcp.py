@@ -1,12 +1,10 @@
 """Tests for _data_* retrieval functions and the MCP tool dispatch layer."""
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +59,7 @@ def test_data_search_empty_db(monkeypatch):
     monkeypatch.setattr(cmd, "read_session", lambda: [])
 
     from engra.commands import _data_search
+
     assert _data_search("anything") == []
 
 
@@ -76,7 +75,16 @@ def test_data_search_returns_correct_shape(monkeypatch):
     results = _data_search("query", top_k=5)
     assert len(results) == 1
     r = results[0]
-    for key in ("filename", "page", "page_label", "total_pages", "chunk", "score", "text", "project"):
+    for key in (
+        "filename",
+        "page",
+        "page_label",
+        "total_pages",
+        "chunk",
+        "score",
+        "text",
+        "project",
+    ):
         assert key in r, f"missing key: {key}"
 
 
@@ -375,6 +383,7 @@ def test_data_info_shape(monkeypatch):
 @pytest.fixture
 def patched_session(tmp_path, monkeypatch):
     from engra import storage
+
     monkeypatch.setattr(storage, "STATE_FILE", tmp_path / "state.toml")
     return tmp_path / "state.toml"
 
@@ -407,8 +416,8 @@ def test_data_project_activate_unknown(monkeypatch, patched_session):
 
 
 def test_data_project_deactivate(monkeypatch, patched_session):
-    from engra.commands import _data_project_activate, _data_project_deactivate
     import engra.commands as cmd
+    from engra.commands import _data_project_activate, _data_project_deactivate
 
     metas = [{**META, "project": "p"}]
     col = _col(metas)
@@ -443,12 +452,14 @@ def _import_mcp_server():
             def decorator(fn):
                 self._list_tools_fn = fn
                 return fn
+
             return decorator
 
         def call_tool(self):
             def decorator(fn):
                 self._call_tool_fn = fn
                 return fn
+
             return decorator
 
         def create_initialization_options(self):
@@ -480,24 +491,33 @@ def _import_mcp_server():
     # Force reimport with stubs in place
     sys.modules.pop("engra.mcp_server", None)
     import engra.mcp_server as ms
+
     return ms
 
 
 def test_mcp_list_tools_returns_all_nine():
     import asyncio
+
     ms = _import_mcp_server()
     tools = asyncio.run(ms.server._list_tools_fn())
     names = {t.name for t in tools}
     expected = {
-        "engra_search", "engra_get_chunk", "engra_get_neighbors",
-        "engra_list_projects", "engra_list_files", "engra_index",
-        "engra_info", "engra_project_activate", "engra_project_deactivate",
+        "engra_search",
+        "engra_get_chunk",
+        "engra_get_neighbors",
+        "engra_list_projects",
+        "engra_list_files",
+        "engra_index",
+        "engra_info",
+        "engra_project_activate",
+        "engra_project_deactivate",
     }
     assert names == expected
 
 
 def test_mcp_call_tool_search_round_trips(monkeypatch):
     import asyncio
+
     import engra.commands as cmd
 
     col = _col([META])
@@ -515,6 +535,7 @@ def test_mcp_call_tool_search_round_trips(monkeypatch):
 
 def test_mcp_call_tool_unknown_returns_error():
     import asyncio
+
     ms = _import_mcp_server()
     results = asyncio.run(ms.server._call_tool_fn("not_a_tool", {}))
     data = json.loads(results[0].text)
@@ -524,9 +545,12 @@ def test_mcp_call_tool_unknown_returns_error():
 
 def test_mcp_call_tool_exception_returns_error(monkeypatch):
     import asyncio
+
     import engra.commands as cmd
 
-    monkeypatch.setattr(cmd, "_data_search", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("db down")))
+    monkeypatch.setattr(
+        cmd, "_data_search", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("db down"))
+    )
 
     ms = _import_mcp_server()
     results = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
@@ -537,6 +561,7 @@ def test_mcp_call_tool_exception_returns_error(monkeypatch):
 
 def test_mcp_list_files_dispatch(monkeypatch):
     import asyncio
+
     import engra.commands as cmd
 
     col = _col([META])
@@ -550,6 +575,7 @@ def test_mcp_list_files_dispatch(monkeypatch):
 
 def test_mcp_info_dispatch(monkeypatch):
     import asyncio
+
     import engra.commands as cmd
 
     col = _col([META])
@@ -563,6 +589,7 @@ def test_mcp_info_dispatch(monkeypatch):
 
 def test_mcp_list_projects_dispatch(monkeypatch):
     import asyncio
+
     import engra.commands as cmd
 
     col = _col([META])

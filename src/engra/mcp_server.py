@@ -15,13 +15,12 @@ import logging
 import sys
 
 try:
+    from mcp import types as mcp_types
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp import types as mcp_types
 except ImportError as _exc:
     raise ImportError(
-        "MCP support requires the 'mcp' package. "
-        "Install with: pip install 'engra[mcp]'"
+        "MCP support requires the 'mcp' package. Install with: pip install 'engra[mcp]'"
     ) from _exc
 
 from engra.commands import (
@@ -66,22 +65,41 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "description": "Restrict to these projects (null = use active session)",
                     },
                     "top": {"type": "integer", "default": 5, "description": "Max results"},
-                    "min_score": {"type": "number", "default": 0.0, "description": "Minimum similarity 0–1"},
-                    "filename": {"type": ["string", "null"], "default": None, "description": "Restrict to one file"},
+                    "min_score": {
+                        "type": "number",
+                        "default": 0.0,
+                        "description": "Minimum similarity 0–1",
+                    },
+                    "filename": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": "Restrict to one file",
+                    },
                 },
                 "required": ["query"],
             },
         ),
         mcp_types.Tool(
             name="engra_get_chunk",
-            description="Retrieve full text of all chunks on a page (or a specific chunk). Use after search to read beyond the snippet.",
+            description=(
+                "Retrieve full text of all chunks on a page (or a specific chunk). "
+                "Use after search to read beyond the snippet."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "filename": {"type": "string"},
                     "page": {"type": "integer", "description": "Physical page number"},
-                    "page_end": {"type": ["integer", "null"], "default": None, "description": "End of page range (inclusive)"},
-                    "chunk": {"type": ["integer", "null"], "default": None, "description": "Specific chunk index"},
+                    "page_end": {
+                        "type": ["integer", "null"],
+                        "default": None,
+                        "description": "End of page range (inclusive)",
+                    },
+                    "chunk": {
+                        "type": ["integer", "null"],
+                        "default": None,
+                        "description": "Specific chunk index",
+                    },
                 },
                 "required": ["filename", "page"],
             },
@@ -104,7 +122,11 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "enum": ["next", "prev", "both"],
                         "default": "next",
                     },
-                    "count": {"type": "integer", "default": 1, "description": "Chunks to retrieve in each direction"},
+                    "count": {
+                        "type": "integer",
+                        "default": 1,
+                        "description": "Chunks to retrieve in each direction",
+                    },
                 },
                 "required": ["filename", "page", "chunk"],
             },
@@ -120,7 +142,11 @@ async def list_tools() -> list[mcp_types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "project": {"type": ["string", "null"], "default": None, "description": "Filter by project"},
+                    "project": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": "Filter by project",
+                    },
                 },
             },
         ),
@@ -140,7 +166,11 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "description": "File or directory paths to index",
                     },
                     "project": {"type": ["string", "null"], "default": None},
-                    "force": {"type": "boolean", "default": False, "description": "Re-index even if already present"},
+                    "force": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Re-index even if already present",
+                    },
                 },
                 "required": ["paths"],
             },
@@ -238,7 +268,9 @@ def run_mcp_server() -> None:
     Redirects the Rich console to stderr so stdout stays clean for JSON-RPC.
     """
     import asyncio
+
     from rich.console import Console as RichConsole
+
     import engra.commands as _cmds
 
     # stdout is the JSON-RPC channel — redirect all console output to stderr

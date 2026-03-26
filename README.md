@@ -75,6 +75,74 @@ engra search "hydraulic pressure" --all       # override: search everywhere
 engra project deactivate
 ```
 
+## Retrieving full chunk text
+
+Search results show a short snippet. Use `engra get` to read the full text of any chunk:
+
+```bash
+engra get report.pdf 42              # all chunks on page 42
+engra get report.pdf 42 --chunk 1   # specific chunk
+engra get report.pdf 42 --next 2    # two chunks after the given position
+engra get report.pdf 42 --prev      # one chunk before
+engra get report.pdf 5-10           # all chunks across a page range
+```
+
+## Bookmarks
+
+Save and re-run named searches:
+
+```bash
+engra bookmark save torque "torque sensor calibration" --project iso-std
+engra bookmark run torque
+engra bookmark list
+engra bookmark remove torque
+```
+
+## Asking questions (RAG)
+
+`engra ask` retrieves relevant chunks and sends them to a local LLM for an answer.
+
+```bash
+engra ask "What is the maximum torque for the PTO shaft?"
+engra ask "query" --project iso-std          # restrict context to a project
+engra ask "query" --chunks 10               # use more context chunks
+engra ask "query" --all                     # global context, ignore active session
+```
+
+Configure the LLM endpoint in `~/.config/engra/config.toml`:
+
+```toml
+[ask]
+base_url = "http://localhost:11434/v1"   # Ollama default
+model = "llama3"
+context_chunks = 5
+```
+
+## MCP server
+
+engra can act as an MCP server so AI assistants (Claude Code, Cursor, etc.) can search and index documents without running shell commands.
+
+```bash
+pip install "engra[mcp]"                 # install MCP support
+engra mcp --print-config                 # print the config snippet to paste into your client
+engra mcp                                # start the stdio server (usually launched by the client)
+```
+
+The `--print-config` output looks like:
+
+```json
+{
+  "mcpServers": {
+    "engra": {
+      "command": "engra",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+For Claude Code, add this to `.claude/settings.json` (or run `engra mcp --print-config` and follow the prompt).
+
 ## Listing and removing documents
 
 ```bash
@@ -91,7 +159,8 @@ engra remove ./docs/report.pdf                # remove by full path
 | Stored file copies | `~/.local/share/engra/files/` |
 | Session state | `~/.local/share/engra/state.toml` |
 | Config | `~/.config/engra/config.toml` |
-| Logs | `~/.cache/engra/log/engra.log` |
+| Model cache | `~/.cache/engra/models/` |
+| Logs | `~/.local/state/engra/log/engra.log` |
 
 ## Config
 

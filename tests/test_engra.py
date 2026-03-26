@@ -573,7 +573,15 @@ def test_load_bookmarks_empty(patched_bookmarks):
 
 
 def test_save_and_load_bookmarks(patched_bookmarks):
-    bm = {"myquery": {"name": "myquery", "query": "hello", "top": 5, "min_score": None, "created_at": "2026-01-01T00:00:00"}}
+    bm = {
+        "myquery": {
+            "name": "myquery",
+            "query": "hello",
+            "top": 5,
+            "min_score": None,
+            "created_at": "2026-01-01T00:00:00",
+        }
+    }
     _save_bookmarks(bm)
     assert _load_bookmarks() == bm
 
@@ -599,18 +607,15 @@ def test_bookmark_save_query_positional(tmp_path, monkeypatch):
     """bookmark save NAME QUERY accepts query as a positional argument."""
     import engra.main as m
 
-    parser = m.run.__code__  # just check main is importable
+    m.run.__code__  # just check main is importable  # noqa: B018
     # Parse the CLI args via argparse
-    import argparse
     import sys
     from unittest.mock import patch
 
     with patch.object(sys, "argv", ["engra", "bookmark", "save", "myname", "my search query"]):
         # We can't call run() (it tries to log), so build the parser directly
-        import importlib
 
         # Reload main to get a fresh parser
-        import engra.main
 
         # Manually invoke the parser logic from main.py
         ns = _parse_main_args(["bookmark", "save", "myname", "my search query"])
@@ -622,7 +627,7 @@ def test_bookmark_save_query_positional(tmp_path, monkeypatch):
 def _parse_main_args(argv):
     """Helper that builds the engra argparse and parses the given argv list."""
     import argparse
-    from pathlib import Path
+
     from engra import __version__
 
     parser = argparse.ArgumentParser(prog="engra")
@@ -659,7 +664,9 @@ def _make_info_col_stub(metas):
 def _capture_info(monkeypatch, metas, filename=None):
     """Run cmd_info with a mocked collection and return printed text."""
     import io
+
     from rich.console import Console
+
     import engra.commands as commands
 
     col = _make_info_col_stub(metas)
@@ -774,9 +781,7 @@ def test_skip_note_shown_when_sections_skipped():
     indexed = 2
     skipped = total_sections - indexed
     skip_note = (
-        f", skipped {skipped} sections shorter than {MIN_CHARS} chars"
-        if skipped > 0
-        else ""
+        f", skipped {skipped} sections shorter than {MIN_CHARS} chars" if skipped > 0 else ""
     )
     assert str(MIN_CHARS) in skip_note
     assert "skipped 1" in skip_note
@@ -786,11 +791,7 @@ def test_skip_note_empty_when_no_skips():
     total_sections = 3
     indexed = 3
     skipped = total_sections - indexed
-    skip_note = (
-        f", skipped {skipped} sections shorter than 80 chars"
-        if skipped > 0
-        else ""
-    )
+    skip_note = f", skipped {skipped} sections shorter than 80 chars" if skipped > 0 else ""
     assert skip_note == ""
 
 
@@ -846,6 +847,7 @@ def test_load_model_uses_cache_dir(monkeypatch):
     def fake_import(name, *args, **kwargs):
         if name == "fastembed":
             import types
+
             m = types.ModuleType("fastembed")
             m.TextEmbedding = FakeEmbedding
             return m
@@ -854,6 +856,7 @@ def test_load_model_uses_cache_dir(monkeypatch):
     monkeypatch.setattr("builtins.__import__", fake_import)
     # Reset any cached import of fastembed in commands module scope
     import sys
+
     sys.modules.pop("fastembed", None)
 
     cmd.load_model()
@@ -864,7 +867,6 @@ def test_load_model_uses_cache_dir(monkeypatch):
 
 def test_main_suppresses_ort_warning():
     """ORT_LOGGING_LEVEL is set before any fastembed import in main."""
-    import importlib
     import os
     import sys
 
@@ -884,12 +886,14 @@ def _make_ask_collection(docs, metas):
 
     col = MagicMock()
     col.count.return_value = len(docs)
-    col.query.return_value = {"documents": [docs], "metadatas": [metas]}
+    distances = [0.1] * len(docs)
+    col.query.return_value = {"documents": [docs], "metadatas": [metas], "distances": [distances]}
     return col
 
 
 def _make_fake_model(embedding=None):
     from unittest.mock import MagicMock
+
     import numpy as np
 
     model = MagicMock()
@@ -900,7 +904,9 @@ def _make_fake_model(embedding=None):
 
 def test_ask_empty_collection(monkeypatch, capsys):
     import io
+
     from rich.console import Console
+
     import engra.commands as commands
 
     col = _make_ask_collection([], [])
@@ -916,8 +922,10 @@ def test_ask_empty_collection(monkeypatch, capsys):
 def test_ask_llm_success(monkeypatch):
     import io
     import json
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
+
     from rich.console import Console
+
     import engra.commands as commands
 
     docs = ["Torque is a rotational force.", "It is measured in Newton-metres."]
@@ -930,18 +938,21 @@ def test_ask_llm_success(monkeypatch):
     monkeypatch.setattr(commands, "load_model", lambda: _make_fake_model())
     monkeypatch.setattr(commands, "read_session", lambda: [])
 
-    fake_response = json.dumps({
-        "choices": [{"message": {"content": "Torque is a rotational force."}}]
-    }).encode()
+    # Streaming SSE lines
+    sse_chunk = json.dumps({"choices": [{"delta": {"content": "Torque is a rotational force."}}]})
+    sse_lines = [
+        f"data: {sse_chunk}\n".encode(),
+        b"data: [DONE]\n",
+    ]
 
     buf = io.StringIO()
     monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
 
-    import urllib.request
+
     mock_resp = MagicMock()
     mock_resp.__enter__ = lambda s: s
     mock_resp.__exit__ = MagicMock(return_value=False)
-    mock_resp.read.return_value = fake_response
+    mock_resp.__iter__ = lambda s: iter(sse_lines)
 
     with patch("urllib.request.urlopen", return_value=mock_resp):
         commands.cmd_ask("What is torque?")
@@ -955,7 +966,9 @@ def test_ask_llm_connection_error(monkeypatch):
     import io
     import urllib.error
     from unittest.mock import patch
+
     from rich.console import Console
+
     import engra.commands as commands
 
     docs = ["Some text"]
@@ -973,3 +986,257 @@ def test_ask_llm_connection_error(monkeypatch):
 
     out = buf.getvalue()
     assert "failed" in out.lower() or "LLM" in out
+
+
+# ── export / import ────────────────────────────────────────────────────────────
+
+
+def _make_export_collection(project: str = "testproject"):
+    """Return a mock collection pre-loaded with two chunks for export tests."""
+    from unittest.mock import MagicMock
+
+    col = MagicMock()
+    ids = ["id1", "id2"]
+    embeddings = [[0.1, 0.2], [0.3, 0.4]]
+    documents = ["chunk one text", "chunk two text"]
+    metadatas = [
+        {
+            "filename": "a.pdf",
+            "page": 1,
+            "page_label": "1",
+            "chunk": 0,
+            "project": project,
+            "source": "/tmp/a.pdf",
+            "indexed_at": "2026-01-01T00:00:00",
+        },
+        {
+            "filename": "a.pdf",
+            "page": 2,
+            "page_label": "2",
+            "chunk": 0,
+            "project": project,
+            "source": "/tmp/a.pdf",
+            "indexed_at": "2026-01-01T00:00:00",
+        },
+    ]
+    col.get.return_value = {
+        "ids": ids,
+        "embeddings": embeddings,
+        "documents": documents,
+        "metadatas": metadatas,
+    }
+    col.count.return_value = 2
+    return col
+
+
+def test_data_export_returns_expected_shape(monkeypatch, tmp_path):
+    import engra.commands as commands
+
+    col = _make_export_collection()
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "FILES_DIR", tmp_path)
+
+    result = commands._data_export("testproject")
+
+    assert result["project"] == "testproject"
+    assert result["chunk_count"] == 2
+    assert len(result["chunks"]) == 2
+    assert result["chunks"][0]["id"] == "id1"
+    assert result["chunks"][0]["embedding"] == [0.1, 0.2]
+
+
+def test_data_export_raises_for_unknown_project(monkeypatch):
+    from unittest.mock import MagicMock
+
+    import engra.commands as commands
+
+    col = MagicMock()
+    col.get.return_value = {"ids": [], "embeddings": [], "documents": [], "metadatas": []}
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+
+    with pytest.raises(ValueError, match="not found"):
+        commands._data_export("ghost")
+
+
+def test_cmd_export_creates_archive(monkeypatch, tmp_path):
+    import io
+    import json
+    import tarfile
+
+    from rich.console import Console
+
+    import engra.commands as commands
+
+    col = _make_export_collection()
+    # Create a real file so tarfile can add it
+    fake_file = tmp_path / "a.pdf"
+    fake_file.write_bytes(b"%PDF fake")
+
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    stored = files_dir / "a.pdf"
+    stored.write_bytes(b"%PDF fake")
+
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "FILES_DIR", files_dir)
+    buf = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
+
+    out_path = tmp_path / "testproject.engra.tar.gz"
+    commands.cmd_export("testproject", output_path=out_path)
+
+    assert out_path.exists()
+    with tarfile.open(out_path, "r:gz") as tf:
+        names = tf.getnames()
+    assert "manifest.json" in names
+    assert "chunks.json" in names
+
+    # Verify manifest content
+    with tarfile.open(out_path, "r:gz") as tf:
+        manifest = json.load(tf.extractfile("manifest.json"))
+    assert manifest["project"] == "testproject"
+    assert manifest["chunk_count"] == 2
+    assert manifest["model"] == commands.MODEL_NAME
+
+
+def test_data_import_round_trips(monkeypatch, tmp_path):
+    import io
+    import json
+    import tarfile
+
+    import engra.commands as commands
+
+    # Build a minimal valid archive
+    chunks = [
+        {
+            "id": "id1",
+            "embedding": [0.1, 0.2],
+            "document": "hello",
+            "metadata": {"filename": "a.pdf", "page": 1, "project": "p"},
+        },
+    ]
+    manifest = {
+        "engra_export_version": commands.EXPORT_FORMAT_VERSION,
+        "model": commands.MODEL_NAME,
+        "project": "p",
+        "exported_at": "2026-01-01T00:00:00",
+        "chunk_count": 1,
+        "file_count": 0,
+    }
+    arc = tmp_path / "p.engra.tar.gz"
+    with tarfile.open(arc, "w:gz") as tf:
+        for name, obj in [("manifest.json", manifest), ("chunks.json", chunks)]:
+            data = json.dumps(obj).encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+
+    from unittest.mock import MagicMock
+
+    col = MagicMock()
+    col.get.return_value = {"ids": []}
+    files_dir = tmp_path / "files"
+    files_dir.mkdir()
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "FILES_DIR", files_dir)
+    monkeypatch.setattr(commands, "ensure_dirs", lambda: None)
+    monkeypatch.setattr("engra.storage.ensure_dirs", lambda: None)
+
+    result = commands._data_import(arc)
+
+    assert result["project"] == "p"
+    assert result["chunks_added"] == 1
+    col.add.assert_called_once()
+
+
+def test_data_import_rejects_model_mismatch(monkeypatch, tmp_path):
+    import io
+    import json
+    import tarfile
+
+    import engra.commands as commands
+
+    manifest = {
+        "engra_export_version": commands.EXPORT_FORMAT_VERSION,
+        "model": "some/other-model",
+        "project": "p",
+        "exported_at": "2026-01-01T00:00:00",
+        "chunk_count": 0,
+        "file_count": 0,
+    }
+    arc = tmp_path / "p.engra.tar.gz"
+    with tarfile.open(arc, "w:gz") as tf:
+        data = json.dumps(manifest).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+
+    with pytest.raises(ValueError, match="Model mismatch"):
+        commands._data_import(arc)
+
+
+def test_data_import_rejects_duplicate_without_overwrite(monkeypatch, tmp_path):
+    import io
+    import json
+    import tarfile
+    from unittest.mock import MagicMock
+
+    import engra.commands as commands
+
+    manifest = {
+        "engra_export_version": commands.EXPORT_FORMAT_VERSION,
+        "model": commands.MODEL_NAME,
+        "project": "p",
+        "exported_at": "2026-01-01T00:00:00",
+        "chunk_count": 0,
+        "file_count": 0,
+    }
+    arc = tmp_path / "p.engra.tar.gz"
+    with tarfile.open(arc, "w:gz") as tf:
+        data = json.dumps(manifest).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+
+    col = MagicMock()
+    col.get.return_value = {"ids": ["existing-id"]}
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+
+    with pytest.raises(ValueError, match="already exists"):
+        commands._data_import(arc, overwrite=False)
+
+
+def test_cmd_import_soft_calls_cmd_index(monkeypatch, tmp_path):
+    import engra.commands as commands
+
+    calls = []
+    monkeypatch.setattr(
+        commands,
+        "cmd_index",
+        lambda paths, copy, store, project: calls.append((paths, copy, store, project)),
+    )
+
+    src = tmp_path / "mydocs"
+    src.mkdir()
+    commands.cmd_import_soft(src, project="override")
+
+    assert len(calls) == 1
+    paths, copy, store, project = calls[0]
+    assert copy is False
+    assert store is True
+    assert project == "override"
+
+
+def test_cmd_import_soft_defaults_project_to_dirname(monkeypatch, tmp_path):
+    import engra.commands as commands
+
+    calls = []
+    monkeypatch.setattr(
+        commands, "cmd_index", lambda paths, copy, store, project: calls.append(project)
+    )
+
+    src = tmp_path / "myproject"
+    src.mkdir()
+    commands.cmd_import_soft(src)
+
+    assert calls[0] == "myproject"
