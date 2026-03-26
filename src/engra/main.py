@@ -4,23 +4,25 @@ import warnings
 os.environ.setdefault("ORT_LOGGING_LEVEL", "3")
 warnings.filterwarnings("ignore", category=UserWarning, module="fastembed")
 
-import argparse
-import logging
-from pathlib import Path
+import argparse  # noqa: E402
+import logging  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-from engra import __version__
-from engra.commands import (
+from engra import __version__  # noqa: E402
+from engra.commands import (  # noqa: E402
     cmd_ask,
     cmd_bookmark_list,
     cmd_bookmark_remove,
     cmd_bookmark_run,
     cmd_bookmark_save,
+    cmd_export,
     cmd_get,
+    cmd_import,
+    cmd_import_soft,
     cmd_index,
     cmd_info,
     cmd_list,
     cmd_mcp,
-    parse_page_range,
     cmd_project_activate,
     cmd_project_active,
     cmd_project_deactivate,
@@ -29,9 +31,10 @@ from engra.commands import (
     cmd_project_rename,
     cmd_remove,
     cmd_search,
+    parse_page_range,
 )
-from engra.config import init as init_config
-from engra.log import setup as setup_logging
+from engra.config import init as init_config  # noqa: E402
+from engra.log import setup as setup_logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +104,20 @@ def run() -> None:
         action="store_true",
         help="Show complete chunk text instead of a short snippet",
     )
+    p_search.add_argument(
+        "--format",
+        dest="output_format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
 
     # get
     p_get = sub.add_parser("get", help="Retrieve full chunk text by file and page")
     p_get.add_argument("filename", metavar="FILENAME")
-    p_get.add_argument("page", metavar="PAGE_OR_RANGE", help="Page number or range (e.g. 5 or 5-10)")
+    p_get.add_argument(
+        "page", metavar="PAGE_OR_RANGE", help="Page number or range (e.g. 5 or 5-10)"
+    )
     p_get.add_argument(
         "--chunk",
         type=int,
@@ -172,7 +184,13 @@ def run() -> None:
     sub.add_parser("list", help="List indexed documents")
 
     # mcp
-    sub.add_parser("mcp", help="Start MCP stdio server (requires pip install 'engra[mcp]')")
+    p_mcp = sub.add_parser("mcp", help="Start MCP stdio server (requires pip install 'engra[mcp]')")
+    p_mcp.add_argument(
+        "--print-config",
+        action="store_true",
+        dest="mcp_print_config",
+        help="Print the MCP client config snippet and exit",
+    )
 
     # remove
     p_remove = sub.add_parser("remove", help="Remove a document from the index")
@@ -215,6 +233,43 @@ def run() -> None:
     p_proj_remove = proj_sub.add_parser("remove", help="Remove a project from the index")
     p_proj_remove.add_argument("name")
 
+    # export
+    p_export = sub.add_parser("export", help="Export a project to a portable archive")
+    p_export.add_argument("project", metavar="PROJECT", help="Project name to export")
+    p_export.add_argument(
+        "-o",
+        "--output",
+        metavar="FILE",
+        type=Path,
+        default=None,
+        help="Output path (default: <project>.engra.tar.gz)",
+    )
+
+    # import
+    p_import = sub.add_parser("import", help="Import a project from an archive or directory")
+    p_import.add_argument(
+        "source",
+        metavar="SOURCE",
+        type=Path,
+        help="Archive (.tar.gz) for hard import, or directory path with --soft",
+    )
+    p_import.add_argument(
+        "--soft",
+        action="store_true",
+        help="Soft import: index a directory with symlinks (no re-embedding if already indexed)",
+    )
+    p_import.add_argument(
+        "--project",
+        metavar="NAME",
+        default=None,
+        help="Project name override (soft import only; default: directory name)",
+    )
+    p_import.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace existing project data (hard import only)",
+    )
+
     args = parser.parse_args()
 
     log_kwargs: dict = {"console_level": args.log, "file_level": args.log_file}
@@ -245,6 +300,7 @@ def run() -> None:
             filename=args.file,
             projects=args.projects if not args.search_all else None,
             full=args.full,
+            output_format=args.output_format,
         )
     elif args.cmd == "get":
         try:
@@ -255,7 +311,14 @@ def run() -> None:
             p_get.error("--chunk is not allowed with a page range")
         if page_start != page_end and (args.next is not None or args.prev is not None):
             p_get.error("--next/--prev are not allowed with a page range")
-        cmd_get(args.filename, page_start, page_end, chunk=args.chunk, next_k=args.next, prev_k=args.prev)
+        cmd_get(
+            args.filename,
+            page_start,
+            page_end,
+            chunk=args.chunk,
+            next_k=args.next,
+            prev_k=args.prev,
+        )
     elif args.cmd == "ask":
         cmd_ask(
             args.question,
@@ -268,7 +331,17 @@ def run() -> None:
     elif args.cmd == "list":
         cmd_list()
     elif args.cmd == "mcp":
-        cmd_mcp()
+        if args.mcp_print_config:
+            import json
+
+            print(
+                json.dumps(
+                    {"mcpServers": {"engra": {"command": "engra", "args": ["mcp"]}}},
+                    indent=2,
+                )
+            )
+        else:
+            cmd_mcp()
     elif args.cmd == "remove":
         cmd_remove(args.pdf)
     elif args.cmd == "bookmark":
@@ -286,6 +359,15 @@ def run() -> None:
             cmd_bookmark_list()
         elif args.bm_cmd == "remove":
             cmd_bookmark_remove(args.name)
+    elif args.cmd == "export":
+        cmd_export(args.project, output_path=args.output)
+    elif args.cmd == "import":
+        if args.soft:
+            cmd_import_soft(args.source, project=args.project)
+        else:
+            if args.project:
+                p_import.error("--project is only valid with --soft")
+            cmd_import(args.source, overwrite=args.overwrite)
     elif args.cmd == "project":
         if args.proj_cmd == "list":
             cmd_project_list()

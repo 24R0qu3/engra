@@ -17,11 +17,13 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from engra.config import BOOKMARKS_PATH, load as load_config
+from engra.config import BOOKMARKS_PATH
+from engra.config import load as load_config
 from engra.readers import SUPPORTED_EXTENSIONS, read_file
 from engra.storage import (
     CACHE_DIR,
     DB_DIR,
+    FILES_DIR,
     clear_session,
     ensure_dirs,
     read_session,
@@ -58,7 +60,9 @@ def _model_is_cached() -> bool:
 
 
 def load_model():
-    from fastembed import TextEmbedding  # noqa: PLC0415 – lazy import avoids ORT load on non-embedding commands
+    from fastembed import (
+        TextEmbedding,  # noqa: PLC0415 – lazy import avoids ORT load on non-embedding commands
+    )
 
     if _model_is_cached():
         console.print(f"[dim]Loading model '{MODEL_NAME}'...[/dim]")
@@ -210,10 +214,13 @@ def _data_index(
             continue
 
         if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            results.append({
-                **entry, "status": "skipped",
-                "reason": f"unsupported type {file_path.suffix}",
-            })
+            results.append(
+                {
+                    **entry,
+                    "status": "skipped",
+                    "reason": f"unsupported type {file_path.suffix}",
+                }
+            )
             continue
 
         proj = project or default_project(file_path)
@@ -221,10 +228,13 @@ def _data_index(
         existing = collection.get(where={"source": str(file_path.resolve())})
 
         if existing["ids"] and not force:
-            results.append({
-                **entry, "status": "skipped",
-                "reason": f"already indexed ({len(existing['ids'])} chunks)",
-            })
+            results.append(
+                {
+                    **entry,
+                    "status": "skipped",
+                    "reason": f"already indexed ({len(existing['ids'])} chunks)",
+                }
+            )
             continue
 
         reindexed = False
@@ -257,20 +267,22 @@ def _data_index(
                 continue
             for chunk_idx, chunk in enumerate(chunk_text(section.text)):
                 chunk_texts.append(chunk)
-                chunk_metas.append({
-                    "source": str(file_path.resolve()),
-                    "filename": file_path.name,
-                    "page": section.phys_page,
-                    "page_label": section.page_label,
-                    "total_pages": section.total,
-                    "chunk": chunk_idx,
-                    "project": proj,
-                    "indexed_at": indexed_at,
-                    "source_mtime": source_mtime,
-                    "model": MODEL_NAME,
-                    "chunk_size": CHUNK_SIZE,
-                    "chunk_overlap": CHUNK_OVERLAP,
-                })
+                chunk_metas.append(
+                    {
+                        "source": str(file_path.resolve()),
+                        "filename": file_path.name,
+                        "page": section.phys_page,
+                        "page_label": section.page_label,
+                        "total_pages": section.total,
+                        "chunk": chunk_idx,
+                        "project": proj,
+                        "indexed_at": indexed_at,
+                        "source_mtime": source_mtime,
+                        "model": MODEL_NAME,
+                        "chunk_size": CHUNK_SIZE,
+                        "chunk_overlap": CHUNK_OVERLAP,
+                    }
+                )
 
         ids: list[str] = []
         embeddings: list[list[float]] = []
@@ -305,17 +317,19 @@ def _data_index(
                 )
 
         sections_indexed = len({m["page"] for m in metadatas})
-        results.append({
-            **entry,
-            "status": "indexed",
-            "reason": None,
-            "project": proj,
-            "chunks_added": len(ids),
-            "sections_indexed": sections_indexed,
-            "total_sections": total_sections,
-            "reindexed": reindexed,
-            "store_action": store_action,
-        })
+        results.append(
+            {
+                **entry,
+                "status": "indexed",
+                "reason": None,
+                "project": proj,
+                "chunks_added": len(ids),
+                "sections_indexed": sections_indexed,
+                "total_sections": total_sections,
+                "reindexed": reindexed,
+                "store_action": store_action,
+            }
+        )
 
     return {"total_chunks": collection.count(), "results": results}
 
@@ -363,19 +377,21 @@ def _data_search(
         shown += 1
         if shown > top_k:
             break
-        output.append({
-            "filename": meta["filename"],
-            "page": meta["page"],
-            "page_label": meta.get("page_label", str(meta["page"])),
-            "total_pages": meta.get("total_pages", 0),
-            "chunk": meta.get("chunk", 0),
-            "score": round(score, 4),
-            "text": text,
-            "project": meta.get("project", ""),
-            "source": meta.get("source", ""),
-            "indexed_at": meta.get("indexed_at"),
-            "source_mtime": meta.get("source_mtime"),
-        })
+        output.append(
+            {
+                "filename": meta["filename"],
+                "page": meta["page"],
+                "page_label": meta.get("page_label", str(meta["page"])),
+                "total_pages": meta.get("total_pages", 0),
+                "chunk": meta.get("chunk", 0),
+                "score": round(score, 4),
+                "text": text,
+                "project": meta.get("project", ""),
+                "source": meta.get("source", ""),
+                "indexed_at": meta.get("indexed_at"),
+                "source_mtime": meta.get("source_mtime"),
+            }
+        )
 
     return output
 
@@ -442,9 +458,8 @@ def _data_get_neighbors(
     elif direction == "prev":
         targets = list(range(max(0, ref_idx - count), ref_idx))
     else:  # both
-        targets = (
-            list(range(max(0, ref_idx - count), ref_idx))
-            + list(range(ref_idx + 1, min(ref_idx + 1 + count, len(sequence))))
+        targets = list(range(max(0, ref_idx - count), ref_idx)) + list(
+            range(ref_idx + 1, min(ref_idx + 1 + count, len(sequence)))
         )
 
     result: list[dict] = []
@@ -455,14 +470,16 @@ def _data_get_neighbors(
             include=["documents", "metadatas"],
         )
         for meta, text in zip(r.get("metadatas") or [], r.get("documents") or []):
-            result.append({
-                "filename": filename,
-                "page": meta.get("page", tp),
-                "page_label": meta.get("page_label", str(tp)),
-                "chunk_idx": meta.get("chunk", tc),
-                "text": text,
-                "source": meta.get("source", ""),
-            })
+            result.append(
+                {
+                    "filename": filename,
+                    "page": meta.get("page", tp),
+                    "page_label": meta.get("page_label", str(tp)),
+                    "chunk_idx": meta.get("chunk", tc),
+                    "text": text,
+                    "source": meta.get("source", ""),
+                }
+            )
 
     return result
 
@@ -531,9 +548,13 @@ def _data_info() -> dict:
     collection = get_collection()
     if collection.count() == 0:
         return {
-            "total_chunks": 0, "files": 0, "projects": 0,
-            "model": MODEL_NAME, "chunk_size": CHUNK_SIZE,
-            "chunk_overlap": CHUNK_OVERLAP, "last_indexed": "unknown",
+            "total_chunks": 0,
+            "files": 0,
+            "projects": 0,
+            "model": MODEL_NAME,
+            "chunk_size": CHUNK_SIZE,
+            "chunk_overlap": CHUNK_OVERLAP,
+            "last_indexed": "unknown",
         }
 
     all_meta = collection.get(include=["metadatas"])["metadatas"]
@@ -576,6 +597,118 @@ def _data_project_deactivate() -> dict:
     """Clear the active session. Returns {active_projects: []}."""
     clear_session()
     return {"active_projects": []}
+
+
+EXPORT_FORMAT_VERSION = 1
+_EXPORT_BATCH = 500  # max ids per collection.add() call
+
+
+def _data_export(project: str) -> dict:
+    """Return all data needed to archive a project.
+
+    Returns {project, chunk_count, chunks: [{id, embedding, document, metadata}],
+             file_paths: [Path]}
+    """
+    collection = get_collection()
+    result = collection.get(
+        where={"project": project},
+        include=["embeddings", "documents", "metadatas"],
+    )
+    ids: list[str] = result["ids"]
+    if not ids:
+        raise ValueError(f"Project {project!r} not found or empty.")
+
+    embeddings: list = result["embeddings"]
+    documents: list[str] = result["documents"]
+    metadatas: list[dict] = result["metadatas"]
+
+    chunks = [
+        {"id": i, "embedding": e, "document": d, "metadata": m}
+        for i, e, d, m in zip(ids, embeddings, documents, metadatas)
+    ]
+
+    # Collect stored file paths (may be symlinks)
+    seen_files: set[str] = set()
+    file_paths: list[Path] = []
+    for m in metadatas:
+        fname = m.get("filename", "")
+        if fname and fname not in seen_files:
+            seen_files.add(fname)
+            candidate = FILES_DIR / fname
+            if candidate.exists():
+                file_paths.append(candidate)
+
+    return {
+        "project": project,
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+        "file_paths": file_paths,
+    }
+
+
+def _data_import(archive_path: Path, overwrite: bool = False) -> dict:
+    """Import a project from a tar.gz archive produced by cmd_export.
+
+    Returns {project, chunks_added, files_restored}.
+    Raises ValueError on incompatible model or duplicate project (without overwrite).
+    """
+    import json as _json
+    import tarfile
+
+    with tarfile.open(archive_path, "r:gz") as tf:
+        # Read manifest
+        manifest_member = tf.getmember("manifest.json")
+        manifest: dict = _json.load(tf.extractfile(manifest_member))  # type: ignore[arg-type]
+
+        if manifest.get("engra_export_version") != EXPORT_FORMAT_VERSION:
+            raise ValueError(
+                f"Unsupported export version {manifest.get('engra_export_version')!r}."
+            )
+        if manifest.get("model") != MODEL_NAME:
+            raise ValueError(
+                f"Model mismatch: archive uses {manifest['model']!r}, "
+                f"this install uses {MODEL_NAME!r}. Embeddings are incompatible."
+            )
+
+        project: str = manifest["project"]
+        collection = get_collection()
+
+        if not overwrite:
+            existing = collection.get(where={"project": project}, include=[])
+            if existing["ids"]:
+                raise ValueError(
+                    f"Project {project!r} already exists. Use --overwrite to replace it."
+                )
+        else:
+            collection.delete(where={"project": project})
+
+        # Read chunks
+        chunks_member = tf.getmember("chunks.json")
+        chunks: list[dict] = _json.load(tf.extractfile(chunks_member))  # type: ignore[arg-type]
+
+        # Add in batches
+        for start in range(0, len(chunks), _EXPORT_BATCH):
+            batch = chunks[start : start + _EXPORT_BATCH]
+            collection.add(
+                ids=[c["id"] for c in batch],
+                embeddings=[c["embedding"] for c in batch],
+                documents=[c["document"] for c in batch],
+                metadatas=[c["metadata"] for c in batch],
+            )
+
+        # Restore files
+        ensure_dirs()
+        files_restored = 0
+        for member in tf.getmembers():
+            if member.name.startswith("files/") and not member.isdir():
+                fname = Path(member.name).name
+                dest = FILES_DIR / fname
+                raw = tf.extractfile(member)
+                if raw is not None:
+                    dest.write_bytes(raw.read())
+                    files_restored += 1
+
+    return {"project": project, "chunks_added": len(chunks), "files_restored": files_restored}
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -649,6 +782,7 @@ def cmd_index(
         TaskProgressColumn(),
         console=console,
     ) as progress:
+
         def on_progress(done: int, total: int, filename: str) -> None:
             if filename not in tasks:
                 tasks[filename] = progress.add_task(
@@ -708,6 +842,7 @@ def cmd_search(
     filename: str | None = None,
     projects: list[str] | None = None,
     full: bool = False,
+    output_format: str = "text",
 ) -> None:
     if get_collection().count() == 0:
         console.print(
@@ -719,12 +854,26 @@ def cmd_search(
     if active_projects:
         console.print(f"[dim]Searching in project(s): {', '.join(active_projects)}[/dim]")
 
-    hits = _data_search(query, top_k=top_k, min_score=min_score, filename=filename, projects=projects)
+    hits = _data_search(
+        query, top_k=top_k, min_score=min_score, filename=filename, projects=projects
+    )
 
-    _warn_stale_from_metas([
-        {"source": h["source"], "indexed_at": h.get("indexed_at"), "source_mtime": h.get("source_mtime")}
-        for h in hits
-    ])
+    if output_format == "json":
+        import json as _json
+
+        print(_json.dumps(hits, default=str))
+        return
+
+    _warn_stale_from_metas(
+        [
+            {
+                "source": h["source"],
+                "indexed_at": h.get("indexed_at"),
+                "source_mtime": h.get("source_mtime"),
+            }
+            for h in hits
+        ]
+    )
     console.print(f'\nResults for: [bold]"{query}"[/bold]')
     console.rule()
 
@@ -784,49 +933,28 @@ def cmd_ask(
         "If the context does not contain enough information, say so.",
     )
 
-    collection = get_collection()
-    if collection.count() == 0:
+    if get_collection().count() == 0:
         console.print(
             "[yellow]Knowledge base is empty.[/yellow] Run: [bold]engra index <file>[/bold]"
         )
         return
 
-    if projects:
-        active_projects = projects
-    else:
-        active_projects = read_session()
+    hits = _data_search(question, top_k=top_k, projects=projects, filename=filename)
 
-    where = _build_where(active_projects, filename)
-
-    model = load_model()
-    query_embedding = next(model.query_embed([question])).tolist()
-
-    query_kwargs: dict = dict(
-        query_embeddings=[query_embedding],
-        n_results=min(top_k, collection.count()),
-        include=["documents", "metadatas"],
-    )
-    if where:
-        query_kwargs["where"] = where
-
-    results = collection.query(**query_kwargs)
-    docs = results["documents"][0]
-    metas = results["metadatas"][0]
-
-    if not docs:
+    if not hits:
         console.print("[yellow]No relevant chunks found.[/yellow]")
         return
 
     # Build context block
     context_parts = []
-    for i, (text, meta) in enumerate(zip(docs, metas), 1):
-        label = f"[{i}] {meta['filename']} p.{meta.get('page_label', meta['page'])}"
-        context_parts.append(f"{label}\n{text.strip()}")
+    for i, h in enumerate(hits, 1):
+        label = f"[{i}] {h['filename']} p.{h['page_label']}"
+        context_parts.append(f"{label}\n{h['text'].strip()}")
     context_text = "\n\n---\n\n".join(context_parts)
 
     # Print sources header
-    console.print(f'\n[bold]Question:[/bold] {question}')
-    console.print(f'[dim]Context: {len(docs)} chunk(s) from index[/dim]')
+    console.print(f"\n[bold]Question:[/bold] {question}")
+    console.print(f"[dim]Context: {len(hits)} chunk(s) from index[/dim]")
     console.rule()
 
     # Call LLM
@@ -842,7 +970,7 @@ def cmd_ask(
                     "content": f"Context:\n\n{context_text}\n\nQuestion: {question}",
                 },
             ],
-            "stream": False,
+            "stream": True,
         }
     ).encode()
 
@@ -853,30 +981,36 @@ def cmd_ask(
         method="POST",
     )
 
+    console.print(f"\n[bold green]Answer[/bold green] [dim](model: {model_id})[/dim]\n")
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
-            response_data = _json.loads(resp.read())
-        answer = response_data["choices"][0]["message"]["content"]
+            for raw_line in resp:
+                line = raw_line.decode().strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[len("data:") :].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = _json.loads(data_str)
+                    delta = chunk["choices"][0]["delta"].get("content", "")
+                    if delta:
+                        console.print(delta, end="")
+                except (_json.JSONDecodeError, KeyError, IndexError):
+                    continue
     except urllib.error.URLError as exc:
-        console.print(f"[red]LLM request failed:[/red] {exc}")
+        console.print(f"\n[red]LLM request failed:[/red] {exc}")
         console.print(
             f"[dim]Ensure your LLM server is running at [bold]{api_base}[/bold] "
             "or configure [bold]ask.api_base[/bold] in ~/.config/engra/config.toml[/dim]"
         )
         return
-    except (KeyError, IndexError, _json.JSONDecodeError) as exc:
-        console.print(f"[red]Unexpected LLM response:[/red] {exc}")
-        return
 
-    console.print(f"\n[bold green]Answer[/bold green] [dim](model: {model_id})[/dim]\n")
-    console.print(answer)
-    console.print()
+    console.print("\n")
     console.rule("Sources")
-    for i, meta in enumerate(metas, 1):
-        page_label = meta.get("page_label", str(meta["page"]))
+    for i, h in enumerate(hits, 1):
         console.print(
-            f"  [{i}] {meta['filename']}  p.{page_label}  "
-            f"[dim](chunk {meta.get('chunk', 0)})[/dim]"
+            f"  [{i}] {h['filename']}  p.{h['page_label']}  [dim](chunk {h['chunk']})[/dim]"
         )
 
 
@@ -940,7 +1074,9 @@ def _find_seq_index(sequence: list[tuple[int, int, str]], page: int, chunk: int)
     return None
 
 
-def _print_nav_hint(filename: str, sequence: list[tuple[int, int, str]], first_idx: int, last_idx: int) -> None:
+def _print_nav_hint(
+    filename: str, sequence: list[tuple[int, int, str]], first_idx: int, last_idx: int
+) -> None:
     """Print ← prev / next → navigation hint based on displayed range."""
     if first_idx > 0:
         pp, pc, _ = sequence[first_idx - 1]
@@ -981,7 +1117,9 @@ def cmd_get(
     col = get_collection()
 
     # Stale/missing check for this file
-    file_metas_list: list[dict] = col.get(where={"filename": filename}, include=["metadatas"]).get("metadatas") or []
+    file_metas_list: list[dict] = (
+        col.get(where={"filename": filename}, include=["metadatas"]).get("metadatas") or []
+    )
     if file_metas_list:
         _warn_stale_from_metas([file_metas_list[0]])
 
@@ -1001,12 +1139,16 @@ def cmd_get(
         else:
             ref_chunk = chunk
             if _find_seq_index(sequence, ref_page, chunk) is None:
-                console.print(f"[yellow]Chunk not found:[/yellow] {filename!r} page {ref_page} chunk {chunk}")
+                console.print(
+                    f"[yellow]Chunk not found:[/yellow] {filename!r} page {ref_page} chunk {chunk}"
+                )
                 return
 
         direction = "next" if next_k is not None else "prev"
         count = next_k if next_k is not None else (prev_k or 1)
-        chunks = _data_get_neighbors(filename, ref_page, ref_chunk, direction=direction, count=count)
+        chunks = _data_get_neighbors(
+            filename, ref_page, ref_chunk, direction=direction, count=count
+        )
 
         if not chunks:
             edge = "end" if next_k is not None else "beginning"
@@ -1014,7 +1156,16 @@ def cmd_get(
             return
 
         for c in chunks:
-            _print_chunk(filename, {"page": c["page"], "page_label": c["page_label"], "chunk": c["chunk_idx"], "source": c["source"]}, c["text"])
+            _print_chunk(
+                filename,
+                {
+                    "page": c["page"],
+                    "page_label": c["page_label"],
+                    "chunk": c["chunk_idx"],
+                    "source": c["source"],
+                },
+                c["text"],
+            )
 
         first_idx = _find_seq_index(sequence, chunks[0]["page"], chunks[0]["chunk_idx"])
         last_idx = _find_seq_index(sequence, chunks[-1]["page"], chunks[-1]["chunk_idx"])
@@ -1036,12 +1187,23 @@ def cmd_get(
         return
 
     for c in chunks:
-        _print_chunk(filename, {"page": c["page"], "page_label": c["page_label"], "chunk": c["chunk_idx"], "source": c["source"]}, c["text"])
+        _print_chunk(
+            filename,
+            {
+                "page": c["page"],
+                "page_label": c["page_label"],
+                "chunk": c["chunk_idx"],
+                "source": c["source"],
+            },
+            c["text"],
+        )
 
     found_pages = {c["page"] for c in chunks}
     missing_pages = [p for p in range(page_start, page_end + 1) if p not in found_pages]
     if missing_pages:
-        console.print(f"[yellow]pages {_format_missing_pages(missing_pages)} not found in index[/yellow]")
+        console.print(
+            f"[yellow]pages {_format_missing_pages(missing_pages)} not found in index[/yellow]"
+        )
 
     if single_page and sequence:
         f_idx = _find_seq_index(sequence, chunks[0]["page"], chunks[0]["chunk_idx"])
@@ -1128,12 +1290,16 @@ def cmd_list() -> None:
     }
     for f in file_list:
         table.add_row(
-            f["project"], f["filename"], str(f["chunks"]),
-            str(f["pages"]), stale_cells[f["stale_status"]], f["source"],
+            f["project"],
+            f["filename"],
+            str(f["chunks"]),
+            str(f["pages"]),
+            stale_cells[f["stale_status"]],
+            f["source"],
         )
 
     console.print(table)
-    console.print(f"Total chunks in index: [bold]{get_collection().count()}[/bold]")
+    console.print(f"Total chunks in index: [bold]{sum(f['chunks'] for f in file_list)}[/bold]")
 
 
 def cmd_remove(pdf_path: Path) -> None:
@@ -1175,6 +1341,7 @@ def _load_bookmarks() -> dict[str, dict]:
         return {}
     try:
         import json as _json
+
         return _json.loads(BOOKMARKS_PATH.read_text(encoding="utf-8"))
     except Exception:
         return {}
@@ -1182,8 +1349,11 @@ def _load_bookmarks() -> dict[str, dict]:
 
 def _save_bookmarks(bookmarks: dict[str, dict]) -> None:
     import json as _json
+
     BOOKMARKS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    BOOKMARKS_PATH.write_text(_json.dumps(bookmarks, indent=2, ensure_ascii=False), encoding="utf-8")
+    BOOKMARKS_PATH.write_text(
+        _json.dumps(bookmarks, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def cmd_bookmark_save(
@@ -1282,8 +1452,10 @@ def cmd_project_list() -> None:
     for p in projects:
         is_active = p["name"] in active
         table.add_row(
-            p["name"], str(p["file_count"]), str(p["chunk_count"]),
-            f"[green]● yes[/green]" if is_active else "[dim]no[/dim]",
+            p["name"],
+            str(p["file_count"]),
+            str(p["chunk_count"]),
+            "[green]● yes[/green]" if is_active else "[dim]no[/dim]",
         )
 
     console.print(table)
@@ -1364,6 +1536,86 @@ def cmd_project_remove(name: str) -> None:
         updated = [p for p in active if p != name]
         write_session(updated) if updated else clear_session()
         console.print("[dim]Removed from active session.[/dim]")
+
+
+def cmd_export(project: str, output_path: Path | None = None) -> None:
+    """Export a project to a tar.gz archive with embeddings and source files."""
+    import datetime
+    import json as _json
+    import tarfile
+
+    try:
+        data = _data_export(project)
+    except ValueError as exc:
+        console.print(f"[red]Export failed:[/red] {exc}")
+        raise SystemExit(1)
+
+    if output_path is None:
+        safe = project.replace("/", "_").replace(" ", "_")
+        output_path = Path(f"{safe}.engra.tar.gz")
+
+    manifest = {
+        "engra_export_version": EXPORT_FORMAT_VERSION,
+        "model": MODEL_NAME,
+        "project": project,
+        "exported_at": datetime.datetime.now().isoformat(),
+        "chunk_count": data["chunk_count"],
+        "file_count": len(data["file_paths"]),
+    }
+
+    with tarfile.open(output_path, "w:gz") as tf:
+        # manifest.json
+        manifest_bytes = _json.dumps(manifest, indent=2).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(manifest_bytes)
+        import io
+
+        tf.addfile(info, io.BytesIO(manifest_bytes))
+
+        # chunks.json
+        chunks_bytes = _json.dumps(data["chunks"], default=str).encode()
+        info = tarfile.TarInfo("chunks.json")
+        info.size = len(chunks_bytes)
+        tf.addfile(info, io.BytesIO(chunks_bytes))
+
+        # files/
+        for file_path in data["file_paths"]:
+            real = file_path.resolve()
+            if real.exists():
+                tf.add(real, arcname=f"files/{file_path.name}")
+
+    console.print(
+        f"[green]Exported[/green] project [bold]{project}[/bold] → [bold]{output_path}[/bold]"
+    )
+    console.print(f"  {data['chunk_count']} chunks, {len(data['file_paths'])} file(s)")
+
+
+def cmd_import(archive_path: Path, overwrite: bool = False) -> None:
+    """Import a project from a tar.gz archive."""
+    try:
+        result = _data_import(archive_path, overwrite=overwrite)
+    except (ValueError, KeyError) as exc:
+        console.print(f"[red]Import failed:[/red] {exc}")
+        raise SystemExit(1)
+
+    console.print(
+        f"[green]Imported[/green] project [bold]{result['project']}[/bold] "
+        f"from [bold]{archive_path.name}[/bold]"
+    )
+    console.print(f"  {result['chunks_added']} chunks, {result['files_restored']} file(s) restored")
+
+
+def cmd_import_soft(source_dir: Path, project: str | None = None) -> None:
+    """Index a directory with symlinks (soft import — files stay in place)."""
+    if not source_dir.is_dir():
+        console.print(f"[red]Not a directory:[/red] {source_dir}")
+        raise SystemExit(1)
+    effective_project = project or source_dir.resolve().name
+    console.print(
+        f"[dim]Soft-importing [bold]{source_dir}[/bold] "
+        f"as project [bold]{effective_project}[/bold] (symlinking files)[/dim]"
+    )
+    cmd_index([source_dir], copy=False, store=True, project=effective_project)
 
 
 def cmd_mcp() -> None:
