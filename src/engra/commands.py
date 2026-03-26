@@ -1814,8 +1814,12 @@ def cmd_export(project: str, output_path: Path | None = None) -> None:
 
         tf.addfile(info, io.BytesIO(manifest_bytes))
 
-        # chunks.json
-        chunks_bytes = _json.dumps(data["chunks"], default=str).encode()
+        # chunks.json – convert numpy arrays to plain lists so JSON round-trips cleanly
+        for chunk in data["chunks"]:
+            e = chunk["embedding"]
+            if hasattr(e, "tolist"):
+                chunk["embedding"] = e.tolist()
+        chunks_bytes = _json.dumps(data["chunks"]).encode()
         info = tarfile.TarInfo("chunks.json")
         info.size = len(chunks_bytes)
         tf.addfile(info, io.BytesIO(chunks_bytes))

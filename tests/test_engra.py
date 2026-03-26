@@ -1239,3 +1239,66 @@ def test_cmd_import_soft_defaults_project_to_dirname(monkeypatch, tmp_path):
     commands.cmd_import_soft(src)
 
     assert calls[0] == "myproject"
+
+
+def test_cmd_export_numpy_embeddings_serialized_as_floats(monkeypatch, tmp_path):
+    """Embeddings returned as numpy arrays must be stored as float lists, not strings.
+
+    Regression test for the bug where `json.dumps(..., default=str)` turned numpy
+    arrays into their repr strings, causing ChromaDB to reject them on import.
+    """
+    import io
+    import json
+    import tarfile
+    from unittest.mock import MagicMock
+
+    import numpy as np
+    from rich.console import Console
+
+    import engra.commands as commands
+
+    # ChromaDB returns embeddings as numpy arrays
+    numpy_embeddings = [np.array([0.1, 0.2, 0.3]), np.array([0.4, 0.5, 0.6])]
+
+    col = MagicMock()
+    col.get.return_value = {
+        "ids": ["id1", "id2"],
+        "embeddings": numpy_embeddings,
+        "documents": ["text one", "text two"],
+        "metadatas": [
+            {
+                "filename": "a.pdf",
+                "page": 1,
+                "page_label": "1",
+                "chunk": 0,
+                "project": "testproject",
+                "source": "/tmp/a.pdf",
+                "indexed_at": "2026-01-01",
+            },
+            {
+                "filename": "a.pdf",
+                "page": 2,
+                "page_label": "2",
+                "chunk": 0,
+                "project": "testproject",
+                "source": "/tmp/a.pdf",
+                "indexed_at": "2026-01-01",
+            },
+        ],
+    }
+    col.count.return_value = 2
+
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "FILES_DIR", tmp_path)
+    monkeypatch.setattr(commands, "console", Console(file=io.StringIO(), highlight=False))
+
+    out_path = tmp_path / "testproject.engra.tar.gz"
+    commands.cmd_export("testproject", output_path=out_path)
+
+    with tarfile.open(out_path, "r:gz") as tf:
+        chunks = json.load(tf.extractfile("chunks.json"))
+
+    for chunk in chunks:
+        emb = chunk["embedding"]
+        assert isinstance(emb, list), "embedding must be a list, not a string or numpy array"
+        assert all(isinstance(v, float) for v in emb), "embedding values must be floats"
