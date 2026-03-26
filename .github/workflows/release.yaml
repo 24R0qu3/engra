@@ -31,15 +31,21 @@ jobs:
       - name: Build executable (Linux / macOS)
         if: matrix.platform != 'windows'
         run: |
-          pyinstaller --onefile --console --name engra src/engra/main.py
+          pyinstaller --onefile --console --name engra \
+            --collect-all chromadb \
+            --collect-all fastembed \
+            src/engra/main.py
           mv dist/engra "dist/engra-${{ github.ref_name }}-${{ matrix.platform }}"
 
       - name: Build executable (Windows)
         if: matrix.platform == 'windows'
         run: |
-          pyinstaller --onefile --console --name engra src/engra/main.py
+          pyinstaller --onefile --console --name engra `
+            --collect-all chromadb `
+            --collect-all fastembed `
+            src/engra/main.py
           mv dist/engra.exe "dist/engra-${{ github.ref_name }}-windows.exe"
-        shell: bash
+        shell: pwsh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
