@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import logging
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -43,6 +44,17 @@ MODEL_NAME = "intfloat/multilingual-e5-large"
 MIN_CHARS = 80
 CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
+
+_NOTABLE_PATTERN = re.compile(
+    r"\b(TBD|TODO|FIXME|stub)\b|not\s+implemented|raise\s+NotImplementedError",
+    re.IGNORECASE,
+)
+
+
+def _is_notable(text: str) -> bool:
+    """Return True if the chunk contains a stub/TBD/TODO/FIXME marker."""
+    return bool(_NOTABLE_PATTERN.search(text))
+
 
 AUTO_DESCRIBE_SAMPLE_CHUNKS = 5
 AUTO_DESCRIBE_MAX_CHARS = 4000
@@ -505,9 +517,19 @@ def _data_search(
     model = load_model()
     query_embedding = next(model.query_embed([query])).tolist()
 
+    n_candidates = top_k * 3 if min_score > 0 else top_k
+    if where:
+        matched_ids = collection.get(where=where, include=[])["ids"]
+        matched_count = len(matched_ids)
+        if matched_count == 0:
+            return []
+        n_candidates = min(n_candidates, matched_count)
+    else:
+        n_candidates = min(n_candidates, collection.count())
+
     query_kwargs: dict = dict(
         query_embeddings=[query_embedding],
-        n_results=min(top_k * 3 if min_score > 0 else top_k, collection.count()),
+        n_results=n_candidates,
         include=["documents", "metadatas", "distances"],
     )
     if where:
@@ -540,6 +562,7 @@ def _data_search(
                 "source": meta.get("source", ""),
                 "indexed_at": meta.get("indexed_at"),
                 "source_mtime": meta.get("source_mtime"),
+                "notable": _is_notable(text),
             }
         )
 
@@ -1102,10 +1125,11 @@ def cmd_search(
             normalized = " ".join(text.split())
             snippet = normalized[:220] + ("…" if len(normalized) > 220 else "")
 
+        notable_marker = "  [yellow bold][!][/yellow bold]" if h.get("notable") else ""
         console.print(
             f"[bold cyan][{i}][/bold cyan] {file_label}  —  "
             f"p.{page_str}/{h['total_pages']}{chunk_info}{phys_info}  "
-            f"[dim](score: {h['score']:.3f})[/dim]"
+            f"[dim](score: {h['score']:.3f})[/dim]{notable_marker}"
         )
         console.print(f"    [dim]{snippet}[/dim]")
         console.print()
