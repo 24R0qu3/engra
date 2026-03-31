@@ -9,6 +9,7 @@ from engra.commands import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     MODEL_NAME,
+    _fetch_linked_results,
     _find_seq_index,
     _format_missing_pages,
     _get_chunk_sequence,
@@ -27,7 +28,14 @@ from engra.commands import (
 )
 from engra.config import _DEFAULT_TOML, DEFAULTS
 from engra.log import setup
-from engra.readers import SUPPORTED_EXTENSIONS, read_html, read_markdown, read_rst, read_text
+from engra.readers import (
+    SUPPORTED_EXTENSIONS,
+    _extract_html_links,
+    read_html,
+    read_markdown,
+    read_rst,
+    read_text,
+)
 from engra.storage import CACHE_DIR, clear_session, read_session, write_session
 
 # ── chunk_text ────────────────────────────────────────────────────────────────
@@ -1731,5 +1739,200 @@ def _parse_search_args(argv):
         "--format", dest="output_format", choices=["text", "json"], default="text"
     )
     p_search.add_argument("--rerank", action="store_true")
+    p_search.add_argument("--links", action="store_true")
 
     return parser.parse_args(argv)
+
+
+# ── _extract_html_links (fix #4) ──────────────────────────────────────────────
+
+
+def _make_soup(html: str):
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(html, "html.parser")
+
+
+def test_extract_html_links_relative_html():
+    soup = _make_soup('<a href="other.html">link</a>')
+    assert _extract_html_links(soup) == ["other.html"]
+
+
+def test_extract_html_links_skips_external():
+    soup = _make_soup('<a href="https://example.com/page.html">ext</a>')
+    assert _extract_html_links(soup) == []
+
+
+def test_extract_html_links_skips_anchor_only():
+    soup = _make_soup('<a href="#section">anchor</a>')
+    assert _extract_html_links(soup) == []
+
+
+def test_extract_html_links_skips_non_html():
+    soup = _make_soup('<a href="image.png">img</a><a href="doc.pdf">pdf</a>')
+    assert _extract_html_links(soup) == []
+
+
+def test_extract_html_links_skips_self_link():
+    soup = _make_soup('<a href="self.html">self</a>')
+    assert _extract_html_links(soup, source_name="self.html") == []
+
+
+def test_extract_html_links_strips_fragment():
+    soup = _make_soup('<a href="other.html#method">method</a>')
+    assert _extract_html_links(soup) == ["other.html"]
+
+
+def test_extract_html_links_strips_path_prefix():
+    soup = _make_soup('<a href="../api/class.html">class</a>')
+    assert _extract_html_links(soup) == ["class.html"]
+
+
+def test_extract_html_links_deduplicates():
+    soup = _make_soup('<a href="a.html">1</a><a href="a.html">2</a>')
+    assert _extract_html_links(soup) == ["a.html"]
+
+
+def test_extract_html_links_sorted():
+    soup = _make_soup('<a href="z.html">z</a><a href="a.html">a</a>')
+    assert _extract_html_links(soup) == ["a.html", "z.html"]
+
+
+def test_read_html_attaches_links_to_sections(tmp_path):
+    f = tmp_path / "page.html"
+    f.write_text('<html><body><p>content</p><a href="other.html">link</a></body></html>')
+    sections = read_html(f)
+    assert all("other.html" in s.links_to for s in sections)
+
+
+def test_read_html_no_links_empty_list(tmp_path):
+    f = tmp_path / "page.html"
+    f.write_text("<html><body><p>no links here</p></body></html>")
+    sections = read_html(f)
+    assert all(s.links_to == [] for s in sections)
+
+
+def test_section_links_to_default_empty():
+    from engra.readers import Section
+
+    s = Section(text="t", phys_page=1, page_label="1", total=1)
+    assert s.links_to == []
+
+
+# ── _fetch_linked_results (fix #4) ────────────────────────────────────────────
+
+
+def _make_primary_hit(filename: str, links_to: str = "") -> dict:
+    return {
+        "filename": filename,
+        "page": 1,
+        "page_label": "1",
+        "total_pages": 1,
+        "chunk": 0,
+        "score": 0.85,
+        "text": f"Content of {filename}",
+        "project": "test",
+        "source": f"/tmp/{filename}",
+        "indexed_at": None,
+        "source_mtime": None,
+        "notable": False,
+        "links_to": links_to,
+        "linked_from": [],
+    }
+
+
+def _make_linked_collection(indexed_filenames: list[str]):
+    """Return a minimal chromadb collection stub for _fetch_linked_results tests."""
+    from unittest.mock import MagicMock
+
+    def fake_get(where=None, include=None, limit=None, **kwargs):
+        filename = where.get("filename") if where else None
+        if filename in indexed_filenames:
+            return {"ids": [f"id_{filename}"], "metadatas": [], "documents": []}
+        return {"ids": [], "metadatas": [], "documents": []}
+
+    def fake_query(query_embeddings=None, n_results=1, include=None, where=None, **kwargs):
+        filename = where.get("filename") if where else None
+        if filename in indexed_filenames:
+            meta = {
+                "filename": filename,
+                "page": 1,
+                "page_label": "1",
+                "total_pages": 1,
+                "chunk": 0,
+                "project": "test",
+                "source": f"/tmp/{filename}",
+                "indexed_at": None,
+                "source_mtime": None,
+                "links_to": "",
+            }
+            return {
+                "documents": [[f"Content of {filename}"]],
+                "metadatas": [[meta]],
+                "distances": [[0.15]],
+            }
+        return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+
+    col = MagicMock()
+    col.get.side_effect = fake_get
+    col.query.side_effect = fake_query
+    return col
+
+
+def test_fetch_linked_results_returns_linked_chunk():
+    col = _make_linked_collection(["linked.html"])
+    primary = [_make_primary_hit("main.html", links_to="linked.html")]
+    results = _fetch_linked_results([0.1] * 10, primary, col, [])
+    assert len(results) == 1
+    assert results[0]["filename"] == "linked.html"
+    assert results[0]["linked_from"] == ["main.html"]
+
+
+def test_fetch_linked_results_skips_unindexed():
+    col = _make_linked_collection([])  # nothing indexed
+    primary = [_make_primary_hit("main.html", links_to="missing.html")]
+    results = _fetch_linked_results([0.1] * 10, primary, col, [])
+    assert results == []
+
+
+def test_fetch_linked_results_skips_primary_filenames():
+    col = _make_linked_collection(["main.html"])
+    # Link points back to a file already in primary results
+    primary = [_make_primary_hit("main.html", links_to="main.html")]
+    results = _fetch_linked_results([0.1] * 10, primary, col, [])
+    assert results == []
+
+
+def test_fetch_linked_results_multiple_sources():
+    col = _make_linked_collection(["shared.html"])
+    primary = [
+        _make_primary_hit("a.html", links_to="shared.html"),
+        _make_primary_hit("b.html", links_to="shared.html"),
+    ]
+    results = _fetch_linked_results([0.1] * 10, primary, col, [])
+    assert len(results) == 1
+    assert set(results[0]["linked_from"]) == {"a.html", "b.html"}
+
+
+def test_fetch_linked_results_empty_links():
+    col = _make_linked_collection(["other.html"])
+    primary = [_make_primary_hit("main.html", links_to="")]
+    results = _fetch_linked_results([0.1] * 10, primary, col, [])
+    assert results == []
+
+
+def test_fetch_linked_results_adds_notable_flag():
+    col = _make_linked_collection(["linked.html"])
+    primary = [_make_primary_hit("main.html", links_to="linked.html")]
+    results = _fetch_linked_results([0.1] * 10, primary, col, [])
+    assert "notable" in results[0]
+
+
+def test_search_links_flag_in_cli():
+    ns = _parse_search_args(["search", "my query", "--links"])
+    assert ns.links is True
+
+
+def test_search_links_flag_default_false():
+    ns = _parse_search_args(["search", "my query"])
+    assert ns.links is False

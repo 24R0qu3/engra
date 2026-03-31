@@ -125,6 +125,11 @@ def run() -> None:
         action="store_true",
         help="Re-rank results with a cross-encoder (requires: pip install 'engra[rerank]')",
     )
+    p_search.add_argument(
+        "--links",
+        action="store_true",
+        help="Surface chunks from files linked by the top results (HTML only)",
+    )
 
     # get
     p_get = sub.add_parser("get", help="Retrieve full chunk text by file and page")
@@ -334,6 +339,7 @@ def run() -> None:
             full=args.full,
             output_format=args.output_format,
             rerank=args.rerank,
+            follow_links=args.links,
         )
     elif args.cmd == "get":
         try:

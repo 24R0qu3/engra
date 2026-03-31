@@ -6,7 +6,7 @@ Each reader returns a list of Section objects — one per natural unit
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -16,6 +16,7 @@ class Section:
     phys_page: int  # 1-based index within the document
     page_label: str  # human-readable label used in citations
     total: int  # total sections in this document
+    links_to: list[str] = field(default_factory=list)  # basenames of linked HTML files
 
 
 def _make_sections(parts: list[tuple[str, str]]) -> list[Section]:
@@ -115,11 +116,42 @@ def _split_by_headings(text: str, heading_re: re.Pattern) -> list[tuple[str, str
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
 
+def _extract_html_links(soup, source_name: str | None = None) -> list[str]:
+    """Return sorted list of relative HTML filenames linked from *soup*.
+
+    Skips external URLs, anchor-only hrefs, non-HTML targets, and self-links.
+    Returns basenames only so they match how filenames are stored in the index.
+    """
+    from urllib.parse import urlparse
+
+    seen: set[str] = set()
+    for tag in soup.find_all("a", href=True):
+        href = tag["href"].strip()
+        if not href:
+            continue
+        parsed = urlparse(href)
+        if parsed.scheme or parsed.netloc:
+            continue  # external URL
+        path_part = parsed.path
+        if not path_part:
+            continue  # anchor-only (#fragment)
+        if not (path_part.endswith(".html") or path_part.endswith(".htm")):
+            continue
+        basename = Path(path_part).name
+        if not basename or basename == source_name:
+            continue  # self-link
+        seen.add(basename)
+    return sorted(seen)
+
+
 def read_html(path: Path) -> list[Section]:
     from bs4 import BeautifulSoup, NavigableString, Tag
 
     html = path.read_text(encoding="utf-8", errors="replace")
     soup = BeautifulSoup(html, "html.parser")
+
+    links = _extract_html_links(soup, source_name=path.name)
+
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
 
@@ -152,7 +184,11 @@ def read_html(path: Path) -> list[Section]:
         parts.append((text, current_label))
 
     parts = [(t, lbl) for t, lbl in parts if t.strip()]
-    return _make_sections(parts) if parts else read_text(path)
+    sections = _make_sections(parts) if parts else read_text(path)
+    if links:
+        for s in sections:
+            s.links_to = links
+    return sections
 
 
 # ── DOCX ──────────────────────────────────────────────────────────────────────

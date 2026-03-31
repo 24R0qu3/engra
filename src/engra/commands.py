@@ -467,6 +467,7 @@ def _data_index(
                         "model": MODEL_NAME,
                         "chunk_size": CHUNK_SIZE,
                         "chunk_overlap": CHUNK_OVERLAP,
+                        "links_to": ",".join(section.links_to),
                     }
                 )
 
@@ -544,6 +545,75 @@ def _data_index(
     return {"total_chunks": collection.count(), "results": results}
 
 
+def _fetch_linked_results(
+    query_embedding: list[float],
+    primary_hits: list[dict],
+    collection: chromadb.Collection,
+    active_projects: list[str] | None,
+) -> list[dict]:
+    """Fetch the most query-relevant chunk from each file linked by the top-3 primary hits.
+
+    Returns result dicts with 'linked_from' populated. Silently skips linked files that
+    are not indexed or already appear in the primary results.
+    """
+    primary_filenames = {h["filename"] for h in primary_hits}
+
+    # Collect linked filename → originating primary filenames (from top-3 only)
+    link_sources: dict[str, list[str]] = {}
+    for h in primary_hits[:3]:
+        for name in h.get("links_to", "").split(","):
+            name = name.strip()
+            if name and name not in primary_filenames:
+                link_sources.setdefault(name, []).append(h["filename"])
+
+    if not link_sources:
+        return []
+
+    linked: list[dict] = []
+    for filename, source_names in sorted(link_sources.items()):
+        where = _build_where(active_projects, filename)
+        if where is None:
+            where = {"filename": filename}
+
+        # Quick existence check before the more expensive query
+        if not collection.get(where=where, include=[], limit=1)["ids"]:
+            continue
+
+        r = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=1,
+            include=["documents", "metadatas", "distances"],
+            where=where,
+        )
+        if not r["documents"][0]:
+            continue
+
+        text = r["documents"][0][0]
+        meta = r["metadatas"][0][0]
+        score = round(1.0 - r["distances"][0][0], 4)
+
+        linked.append(
+            {
+                "filename": meta["filename"],
+                "page": meta["page"],
+                "page_label": meta.get("page_label", str(meta["page"])),
+                "total_pages": meta.get("total_pages", 0),
+                "chunk": meta.get("chunk", 0),
+                "score": score,
+                "text": text,
+                "project": meta.get("project", ""),
+                "source": meta.get("source", ""),
+                "indexed_at": meta.get("indexed_at"),
+                "source_mtime": meta.get("source_mtime"),
+                "notable": _is_notable(text),
+                "links_to": meta.get("links_to", ""),
+                "linked_from": source_names,
+            }
+        )
+
+    return linked
+
+
 def _data_search(
     query: str,
     top_k: int = 5,
@@ -551,11 +621,13 @@ def _data_search(
     filename: str | None = None,
     projects: list[str] | None = None,
     rerank: bool = False,
+    follow_links: bool = False,
 ) -> list[dict]:
     """Semantic search. Returns list of result dicts with text and metadata.
 
     projects=None uses the active session; pass [] to search globally.
     When rerank=True, fetches top_k*3 candidates and re-scores with a cross-encoder.
+    When follow_links=True, appends the best chunk from each file linked by top results.
     """
     collection = get_collection()
     if collection.count() == 0:
@@ -613,11 +685,16 @@ def _data_search(
                 "indexed_at": meta.get("indexed_at"),
                 "source_mtime": meta.get("source_mtime"),
                 "notable": _is_notable(text),
+                "links_to": meta.get("links_to", ""),
+                "linked_from": [],
             }
         )
 
     if rerank and output:
         output = _rerank_results(query, output, top_k)
+
+    if follow_links and output:
+        output.extend(_fetch_linked_results(query_embedding, output, collection, active_projects))
 
     return output
 
@@ -1127,6 +1204,7 @@ def cmd_search(
     full: bool = False,
     output_format: str = "text",
     rerank: bool = False,
+    follow_links: bool = False,
 ) -> None:
     if get_collection().count() == 0:
         console.print(
@@ -1139,7 +1217,13 @@ def cmd_search(
         console.print(f"[dim]Searching in project(s): {', '.join(active_projects)}[/dim]")
 
     hits = _data_search(
-        query, top_k=top_k, min_score=min_score, filename=filename, projects=projects, rerank=rerank
+        query,
+        top_k=top_k,
+        min_score=min_score,
+        filename=filename,
+        projects=projects,
+        rerank=rerank,
+        follow_links=follow_links,
     )
 
     if output_format == "json":
@@ -1161,14 +1245,17 @@ def cmd_search(
     console.print(f'\nResults for: [bold]"{query}"[/bold]')
     console.rule()
 
-    result_projects = {h["project"] for h in hits}
+    primary_hits = [h for h in hits if not h.get("linked_from")]
+    linked_hits = [h for h in hits if h.get("linked_from")]
+
+    result_projects = {h["project"] for h in primary_hits}
     show_project = len(active_projects) != 1 and len(result_projects) > 1
 
-    use_rerank = rerank and hits and hits[0].get("rerank_score") is not None
-    primary_scores = [h["rerank_score"] if use_rerank else h["score"] for h in hits]
+    use_rerank = rerank and primary_hits and primary_hits[0].get("rerank_score") is not None
+    primary_scores = [h["rerank_score"] if use_rerank else h["score"] for h in primary_hits]
     rel_scores = _normalize_scores(primary_scores)
 
-    for i, (h, rel, primary) in enumerate(zip(hits, rel_scores, primary_scores), 1):
+    for i, (h, rel, primary) in enumerate(zip(primary_hits, rel_scores, primary_scores), 1):
         page_str = h["page_label"] if h["page_label"] != str(h["page"]) else str(h["page"])
         chunk_info = f"  chunk {h['chunk']}" if h["chunk"] > 0 else ""
         phys_info = f"  (phys. {h['page']})" if h["page_label"] != str(h["page"]) else ""
@@ -1197,7 +1284,7 @@ def cmd_search(
         console.print(f"    [dim]{snippet}[/dim]")
         console.print()
 
-    if hits:
+    if primary_hits:
         footer = (
             "Scores normalised within result set · rerank scores from cross-encoder"
             if use_rerank
@@ -1205,6 +1292,23 @@ def cmd_search(
         )
         console.print(f"[dim]{footer}[/dim]")
         console.print()
+
+    if linked_hits:
+        console.rule("[dim]Related (linked from results above)[/dim]")
+        for h in linked_hits:
+            page_str = h["page_label"] if h["page_label"] != str(h["page"]) else str(h["page"])
+            linked_from_str = ", ".join(h["linked_from"])
+            notable_marker = "  [yellow bold][!][/yellow bold]" if h.get("notable") else ""
+            text = h["text"]
+            normalized = " ".join(text.split())
+            snippet = normalized[:220] + ("…" if len(normalized) > 220 else "")
+            console.print(
+                f"  [cyan]→[/cyan] {h['filename']}  —  p.{page_str}/{h['total_pages']}  "
+                f"[dim](score: {h['score']:.3f}  linked from: {linked_from_str})[/dim]"
+                f"{notable_marker}"
+            )
+            console.print(f"    [dim]{snippet}[/dim]")
+            console.print()
 
     if not hits:
         msg = f"No results above score {min_score:.2f}."
