@@ -25,6 +25,7 @@ engra = "engra.main:run"
 gpu = ["fastembed-gpu"]  # replaces fastembed; run: pip install ".[gpu]"
 mcp = ["mcp>=1.0,<2.0"]  # MCP stdio server: pip install ".[mcp]"
 ai = ["anthropic>=0.40.0"]  # Claude auto-description: pip install ".[ai]"
+rerank = ["flashrank"]  # cross-encoder re-ranking: pip install ".[rerank]"
 build = ["pyinstaller"]
 test = ["pytest", "ruff"]
 dev = ["bump-my-version", "ruff"]

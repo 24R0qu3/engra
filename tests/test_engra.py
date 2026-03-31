@@ -16,6 +16,7 @@ from engra.commands import (
     _load_bookmarks,
     _model_is_cached,
     _normalize_scores,
+    _rerank_results,
     _save_bookmarks,
     _stale_status,
     _stale_warning,
@@ -1572,3 +1573,163 @@ def test_normalize_scores_output_length_matches_input():
 def test_normalize_scores_two_elements():
     result = _normalize_scores([0.80, 0.90])
     assert result == pytest.approx([0.0, 1.0])
+
+
+# ── _rerank_results (fix #2b — cross-encoder re-ranking) ─────────────────────
+
+
+def _make_hits(n: int) -> list[dict]:
+    """Return n minimal hit dicts suitable for passing to _rerank_results."""
+    return [
+        {
+            "filename": f"doc{i}.html",
+            "page": i,
+            "page_label": str(i),
+            "total_pages": n,
+            "chunk": 0,
+            "score": round(0.85 - i * 0.01, 4),
+            "text": f"Content of chunk {i}",
+            "project": "test",
+            "source": f"/tmp/doc{i}.html",
+            "indexed_at": None,
+            "source_mtime": None,
+            "notable": False,
+        }
+        for i in range(n)
+    ]
+
+
+def _setup_flashrank_mock(monkeypatch, ranked_order: list[int], scores: list[float]):
+    """Patch sys.modules with a flashrank stub and return a mock Ranker.
+
+    Because _rerank_results does `from flashrank import RerankRequest` at call time,
+    we must stub sys.modules so the import resolves without the real package installed.
+    """
+    import sys
+    from unittest.mock import MagicMock
+
+    class FakeRerankRequest:
+        def __init__(self, query, passages):
+            self.query = query
+            self.passages = passages
+
+    def fake_rerank(request):
+        return [
+            {**request.passages[idx], "score": scores[rank]}
+            for rank, idx in enumerate(ranked_order)
+        ]
+
+    ranker = MagicMock()
+    ranker.rerank.side_effect = fake_rerank
+
+    stub = MagicMock()
+    stub.RerankRequest = FakeRerankRequest
+    monkeypatch.setitem(sys.modules, "flashrank", stub)
+
+    return ranker
+
+
+def test_rerank_results_returns_top_k(monkeypatch):
+    import engra.commands as commands
+
+    hits = _make_hits(6)
+    ranker = _setup_flashrank_mock(monkeypatch, [2, 0, 4, 1, 3, 5], [0.9, 0.8, 0.7, 0.6, 0.5, 0.4])
+    monkeypatch.setattr(commands, "_load_reranker", lambda: ranker)
+
+    result = _rerank_results("query", hits, top_k=3)
+    assert len(result) == 3
+
+
+def test_rerank_results_adds_rerank_score(monkeypatch):
+    import engra.commands as commands
+
+    hits = _make_hits(3)
+    ranker = _setup_flashrank_mock(monkeypatch, [1, 0, 2], [0.95, 0.80, 0.60])
+    monkeypatch.setattr(commands, "_load_reranker", lambda: ranker)
+
+    result = _rerank_results("query", hits, top_k=3)
+    assert all("rerank_score" in h for h in result)
+    assert result[0]["rerank_score"] == pytest.approx(0.95)
+
+
+def test_rerank_results_reorders_by_cross_encoder(monkeypatch):
+    import engra.commands as commands
+
+    hits = _make_hits(3)
+    # Reverse the order: chunk 2 should come first
+    ranker = _setup_flashrank_mock(monkeypatch, [2, 1, 0], [0.9, 0.7, 0.3])
+    monkeypatch.setattr(commands, "_load_reranker", lambda: ranker)
+
+    result = _rerank_results("query", hits, top_k=3)
+    assert result[0]["filename"] == "doc2.html"
+    assert result[1]["filename"] == "doc1.html"
+    assert result[2]["filename"] == "doc0.html"
+
+
+def test_rerank_results_preserves_original_fields(monkeypatch):
+    import engra.commands as commands
+
+    hits = _make_hits(2)
+    ranker = _setup_flashrank_mock(monkeypatch, [0, 1], [0.9, 0.5])
+    monkeypatch.setattr(commands, "_load_reranker", lambda: ranker)
+
+    result = _rerank_results("query", hits, top_k=2)
+    assert result[0]["score"] == hits[0]["score"]
+    assert result[0]["text"] == hits[0]["text"]
+    assert result[0]["filename"] == hits[0]["filename"]
+
+
+def test_load_reranker_raises_on_missing_dep(monkeypatch):
+    import builtins
+
+    import engra.commands as commands
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "flashrank":
+            raise ImportError("No module named 'flashrank'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(RuntimeError, match="pip install 'engra\\[rerank\\]'"):
+        commands._load_reranker()
+
+
+def test_search_rerank_flag_in_cli():
+    """--rerank is accepted by the search subparser."""
+    ns = _parse_search_args(["search", "my query", "--rerank"])
+    assert ns.rerank is True
+
+
+def test_search_rerank_flag_default_false():
+    ns = _parse_search_args(["search", "my query"])
+    assert ns.rerank is False
+
+
+def _parse_search_args(argv):
+    import argparse
+
+    from engra import __version__
+
+    parser = argparse.ArgumentParser(prog="engra")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--log", default="WARNING")
+    parser.add_argument("--log-file", default="DEBUG")
+    parser.add_argument("--log-path", default=None)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_search = sub.add_parser("search")
+    p_search.add_argument("query")
+    p_search.add_argument("--top", type=int, default=5)
+    p_search.add_argument("--min-score", type=float, default=0.0)
+    p_search.add_argument("--file", default=None)
+    p_search.add_argument("--project", action="append", dest="projects", default=None)
+    p_search.add_argument("--all", dest="search_all", action="store_true")
+    p_search.add_argument("--full", action="store_true")
+    p_search.add_argument(
+        "--format", dest="output_format", choices=["text", "json"], default="text"
+    )
+    p_search.add_argument("--rerank", action="store_true")
+
+    return parser.parse_args(argv)

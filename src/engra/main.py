@@ -120,6 +120,11 @@ def run() -> None:
         default="text",
         help="Output format (default: text)",
     )
+    p_search.add_argument(
+        "--rerank",
+        action="store_true",
+        help="Re-rank results with a cross-encoder (requires: pip install 'engra[rerank]')",
+    )
 
     # get
     p_get = sub.add_parser("get", help="Retrieve full chunk text by file and page")
@@ -328,6 +333,7 @@ def run() -> None:
             projects=args.projects if not args.search_all else None,
             full=args.full,
             output_format=args.output_format,
+            rerank=args.rerank,
         )
     elif args.cmd == "get":
         try:

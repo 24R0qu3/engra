@@ -17,7 +17,7 @@ traversal so each section stays intact. Fallback to single-section for heading-f
 
 ---
 
-## #2 Score distribution is collapsed (0.83–0.87 range)
+## #2 Score distribution is collapsed (0.83–0.87 range) [DONE]
 
 **Problem:** `intfloat/multilingual-e5-large` compresses cosine similarity into a narrow band on
 technical docs. All results land near 0.84–0.87 regardless of relevance, making ranking

@@ -56,6 +56,39 @@ def _is_notable(text: str) -> bool:
     return bool(_NOTABLE_PATTERN.search(text))
 
 
+_RERANKER_DEFAULT_MODEL = "ms-marco-MiniLM-L-12-v2"
+
+
+def _load_reranker():
+    """Load the flashrank cross-encoder; raises RuntimeError if not installed."""
+    try:
+        from flashrank import Ranker
+    except ImportError:
+        raise RuntimeError("Re-ranking requires flashrank: pip install 'engra[rerank]'") from None
+
+    cfg = load_config()
+    model_name = cfg.get("rerank", {}).get("model", _RERANKER_DEFAULT_MODEL)
+    console.print(f"[dim]Loading re-ranker '{model_name}'…[/dim]")
+    return Ranker(model_name=model_name, cache_dir=str(CACHE_DIR / "rerankers"))
+
+
+def _rerank_results(query: str, hits: list[dict], top_k: int) -> list[dict]:
+    """Re-rank *hits* with a cross-encoder and return the top *top_k* by rerank score."""
+    from flashrank import RerankRequest
+
+    ranker = _load_reranker()
+    passages = [{"id": i, "text": h["text"]} for i, h in enumerate(hits)]
+    request = RerankRequest(query=query, passages=passages)
+    ranked = ranker.rerank(request)
+
+    reranked: list[dict] = []
+    for r in ranked[:top_k]:
+        hit = dict(hits[r["id"]])
+        hit["rerank_score"] = round(float(r["score"]), 4)
+        reranked.append(hit)
+    return reranked
+
+
 def _normalize_scores(scores: list[float]) -> list[float]:
     """Min-max normalise a list of scores to [0, 1] relative to the result set.
 
@@ -517,10 +550,12 @@ def _data_search(
     min_score: float = 0.0,
     filename: str | None = None,
     projects: list[str] | None = None,
+    rerank: bool = False,
 ) -> list[dict]:
     """Semantic search. Returns list of result dicts with text and metadata.
 
     projects=None uses the active session; pass [] to search globally.
+    When rerank=True, fetches top_k*3 candidates and re-scores with a cross-encoder.
     """
     collection = get_collection()
     if collection.count() == 0:
@@ -532,7 +567,7 @@ def _data_search(
     model = load_model()
     query_embedding = next(model.query_embed([query])).tolist()
 
-    n_candidates = top_k * 3 if min_score > 0 else top_k
+    n_candidates = top_k * 3 if (min_score > 0 or rerank) else top_k
     if where:
         matched_ids = collection.get(where=where, include=[])["ids"]
         matched_count = len(matched_ids)
@@ -562,7 +597,7 @@ def _data_search(
         if score < min_score:
             continue
         shown += 1
-        if shown > top_k:
+        if not rerank and shown > top_k:
             break
         output.append(
             {
@@ -580,6 +615,9 @@ def _data_search(
                 "notable": _is_notable(text),
             }
         )
+
+    if rerank and output:
+        output = _rerank_results(query, output, top_k)
 
     return output
 
@@ -1088,6 +1126,7 @@ def cmd_search(
     projects: list[str] | None = None,
     full: bool = False,
     output_format: str = "text",
+    rerank: bool = False,
 ) -> None:
     if get_collection().count() == 0:
         console.print(
@@ -1100,7 +1139,7 @@ def cmd_search(
         console.print(f"[dim]Searching in project(s): {', '.join(active_projects)}[/dim]")
 
     hits = _data_search(
-        query, top_k=top_k, min_score=min_score, filename=filename, projects=projects
+        query, top_k=top_k, min_score=min_score, filename=filename, projects=projects, rerank=rerank
     )
 
     if output_format == "json":
@@ -1125,9 +1164,11 @@ def cmd_search(
     result_projects = {h["project"] for h in hits}
     show_project = len(active_projects) != 1 and len(result_projects) > 1
 
-    rel_scores = _normalize_scores([h["score"] for h in hits])
+    use_rerank = rerank and hits and hits[0].get("rerank_score") is not None
+    primary_scores = [h["rerank_score"] if use_rerank else h["score"] for h in hits]
+    rel_scores = _normalize_scores(primary_scores)
 
-    for i, (h, rel) in enumerate(zip(hits, rel_scores), 1):
+    for i, (h, rel, primary) in enumerate(zip(hits, rel_scores, primary_scores), 1):
         page_str = h["page_label"] if h["page_label"] != str(h["page"]) else str(h["page"])
         chunk_info = f"  chunk {h['chunk']}" if h["chunk"] > 0 else ""
         phys_info = f"  (phys. {h['page']})" if h["page_label"] != str(h["page"]) else ""
@@ -1142,19 +1183,27 @@ def cmd_search(
             normalized = " ".join(text.split())
             snippet = normalized[:220] + ("…" if len(normalized) > 220 else "")
 
+        if use_rerank:
+            score_display = f"rerank: {rel:.2f}  vec: {h['score']:.3f}"
+        else:
+            score_display = f"score: {rel:.2f}"
+
         notable_marker = "  [yellow bold][!][/yellow bold]" if h.get("notable") else ""
         console.print(
             f"[bold cyan][{i}][/bold cyan] {file_label}  —  "
             f"p.{page_str}/{h['total_pages']}{chunk_info}{phys_info}  "
-            f"[dim](score: {rel:.2f})[/dim]{notable_marker}"
+            f"[dim]({score_display})[/dim]{notable_marker}"
         )
         console.print(f"    [dim]{snippet}[/dim]")
         console.print()
 
     if hits:
-        console.print(
-            "[dim]Scores normalised within result set · --format json for raw similarity[/dim]"
+        footer = (
+            "Scores normalised within result set · rerank scores from cross-encoder"
+            if use_rerank
+            else "Scores normalised within result set · --format json for raw similarity"
         )
+        console.print(f"[dim]{footer}[/dim]")
         console.print()
 
     if not hits:
