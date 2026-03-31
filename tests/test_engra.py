@@ -15,6 +15,7 @@ from engra.commands import (
     _is_notable,
     _load_bookmarks,
     _model_is_cached,
+    _normalize_scores,
     _save_bookmarks,
     _stale_status,
     _stale_warning,
@@ -1522,3 +1523,52 @@ def test_is_notable_false_on_empty():
 def test_is_notable_stub_not_matched_as_substring():
     # "stubborn" should not match the \bstub\b pattern
     assert not _is_notable("stubborn resistance to change")
+
+
+# ── _normalize_scores (fix #2a — relative score display) ─────────────────────
+
+
+def test_normalize_scores_empty():
+    assert _normalize_scores([]) == []
+
+
+def test_normalize_scores_single():
+    assert _normalize_scores([0.84]) == [1.0]
+
+
+def test_normalize_scores_all_equal():
+    assert _normalize_scores([0.85, 0.85, 0.85]) == [1.0, 1.0, 1.0]
+
+
+def test_normalize_scores_top_is_one():
+    scores = [0.87, 0.85, 0.84, 0.83]
+    result = _normalize_scores(scores)
+    assert result[0] == pytest.approx(1.0)
+
+
+def test_normalize_scores_bottom_is_zero():
+    scores = [0.87, 0.85, 0.84, 0.83]
+    result = _normalize_scores(scores)
+    assert result[-1] == pytest.approx(0.0)
+
+
+def test_normalize_scores_values_correct():
+    # [0.80, 0.85, 0.90] → spread=0.10; normalised: [0.0, 0.5, 1.0]
+    result = _normalize_scores([0.80, 0.85, 0.90])
+    assert result == pytest.approx([0.0, 0.5, 1.0])
+
+
+def test_normalize_scores_preserves_order():
+    scores = [0.87, 0.85, 0.84]
+    result = _normalize_scores(scores)
+    assert result[0] > result[1] > result[2]
+
+
+def test_normalize_scores_output_length_matches_input():
+    scores = [0.9, 0.85, 0.8, 0.75, 0.7]
+    assert len(_normalize_scores(scores)) == len(scores)
+
+
+def test_normalize_scores_two_elements():
+    result = _normalize_scores([0.80, 0.90])
+    assert result == pytest.approx([0.0, 1.0])

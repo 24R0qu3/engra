@@ -56,6 +56,21 @@ def _is_notable(text: str) -> bool:
     return bool(_NOTABLE_PATTERN.search(text))
 
 
+def _normalize_scores(scores: list[float]) -> list[float]:
+    """Min-max normalise a list of scores to [0, 1] relative to the result set.
+
+    Returns [1.0, ...] when the list is empty, has one element, or all values
+    are identical (no spread to normalise).
+    """
+    if len(scores) <= 1:
+        return [1.0] * len(scores)
+    lo, hi = min(scores), max(scores)
+    spread = hi - lo
+    if spread == 0.0:
+        return [1.0] * len(scores)
+    return [(s - lo) / spread for s in scores]
+
+
 AUTO_DESCRIBE_SAMPLE_CHUNKS = 5
 AUTO_DESCRIBE_MAX_CHARS = 4000
 
@@ -1110,7 +1125,9 @@ def cmd_search(
     result_projects = {h["project"] for h in hits}
     show_project = len(active_projects) != 1 and len(result_projects) > 1
 
-    for i, h in enumerate(hits, 1):
+    rel_scores = _normalize_scores([h["score"] for h in hits])
+
+    for i, (h, rel) in enumerate(zip(hits, rel_scores), 1):
         page_str = h["page_label"] if h["page_label"] != str(h["page"]) else str(h["page"])
         chunk_info = f"  chunk {h['chunk']}" if h["chunk"] > 0 else ""
         phys_info = f"  (phys. {h['page']})" if h["page_label"] != str(h["page"]) else ""
@@ -1129,9 +1146,15 @@ def cmd_search(
         console.print(
             f"[bold cyan][{i}][/bold cyan] {file_label}  —  "
             f"p.{page_str}/{h['total_pages']}{chunk_info}{phys_info}  "
-            f"[dim](score: {h['score']:.3f})[/dim]{notable_marker}"
+            f"[dim](score: {rel:.2f})[/dim]{notable_marker}"
         )
         console.print(f"    [dim]{snippet}[/dim]")
+        console.print()
+
+    if hits:
+        console.print(
+            "[dim]Scores normalised within result set · --format json for raw similarity[/dim]"
+        )
         console.print()
 
     if not hits:
