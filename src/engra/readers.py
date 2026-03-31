@@ -116,15 +116,43 @@ def _split_by_headings(text: str, heading_re: re.Pattern) -> list[tuple[str, str
 
 
 def read_html(path: Path) -> list[Section]:
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup, NavigableString, Tag
 
     html = path.read_text(encoding="utf-8", errors="replace")
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
-    text = soup.get_text(separator="\n").strip()
-    label = soup.title.string.strip()[:60] if soup.title and soup.title.string else path.stem
-    return [Section(text=text, phys_page=1, page_label=label, total=1)]
+
+    heading_tags = {"h1", "h2", "h3", "h4"}
+    default_label = (
+        soup.title.string.strip()[:60] if soup.title and soup.title.string else path.stem
+    )
+
+    parts: list[tuple[str, str]] = []
+    current_lines: list[str] = []
+    current_label = default_label
+
+    root = soup.body or soup
+    for node in root.descendants:
+        if isinstance(node, Tag) and node.name in heading_tags:
+            text = "\n".join(current_lines).strip()
+            if text:
+                parts.append((text, current_label))
+            current_label = node.get_text(" ", strip=True)[:60] or current_label
+            current_lines = []
+        elif isinstance(node, NavigableString) and not any(
+            isinstance(p, Tag) and p.name in heading_tags for p in node.parents
+        ):
+            line = str(node).strip()
+            if line:
+                current_lines.append(line)
+
+    text = "\n".join(current_lines).strip()
+    if text:
+        parts.append((text, current_label))
+
+    parts = [(t, lbl) for t, lbl in parts if t.strip()]
+    return _make_sections(parts) if parts else read_text(path)
 
 
 # ── DOCX ──────────────────────────────────────────────────────────────────────

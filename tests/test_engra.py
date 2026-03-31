@@ -12,6 +12,7 @@ from engra.commands import (
     _find_seq_index,
     _format_missing_pages,
     _get_chunk_sequence,
+    _is_notable,
     _load_bookmarks,
     _model_is_cached,
     _save_bookmarks,
@@ -24,7 +25,7 @@ from engra.commands import (
 )
 from engra.config import _DEFAULT_TOML, DEFAULTS
 from engra.log import setup
-from engra.readers import SUPPORTED_EXTENSIONS, read_markdown, read_rst, read_text
+from engra.readers import SUPPORTED_EXTENSIONS, read_html, read_markdown, read_rst, read_text
 from engra.storage import CACHE_DIR, clear_session, read_session, write_session
 
 # ── chunk_text ────────────────────────────────────────────────────────────────
@@ -1309,7 +1310,6 @@ def test_cmd_export_includes_project_metadata(monkeypatch, tmp_path):
     import io
     import json
     import tarfile
-    from unittest.mock import MagicMock
 
     from rich.console import Console
 
@@ -1342,7 +1342,7 @@ def test_data_import_restores_project_metadata(monkeypatch, tmp_path):
     import io
     import json
     import tarfile
-    from unittest.mock import MagicMock, call
+    from unittest.mock import MagicMock
 
     import engra.commands as commands
 
@@ -1399,3 +1399,126 @@ def test_data_import_restores_project_metadata(monkeypatch, tmp_path):
     assert recorded_meta[0]["name"] == "p"
     assert recorded_meta[0]["description"] == "Restored description"
     assert recorded_meta[0]["keywords"] == ["k1", "k2"]
+
+
+# ── read_html — heading-split (fix #1) ───────────────────────────────────────
+
+
+def test_read_html_no_headings_single_section(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text("<html><body><p>Hello world</p></body></html>")
+    sections = read_html(f)
+    assert len(sections) == 1
+    assert "Hello world" in sections[0].text
+
+
+def test_read_html_splits_by_h2_headings(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<p>intro</p>"
+        "<h2>Section A</h2><p>content A</p>"
+        "<h2>Section B</h2><p>content B</p>"
+        "</body></html>"
+    )
+    sections = read_html(f)
+    # intro section + two heading sections
+    assert len(sections) == 3
+    labels = [s.page_label for s in sections]
+    assert "Section A" in labels
+    assert "Section B" in labels
+
+
+def test_read_html_heading_text_is_label(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text("<html><body><h1>My Title</h1><p>body text</p></body></html>")
+    sections = read_html(f)
+    heading_sections = [s for s in sections if s.page_label == "My Title"]
+    assert len(heading_sections) == 1
+    assert "body text" in heading_sections[0].text
+
+
+def test_read_html_section_numbering(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text("<html><body><h1>A</h1><p>text a</p><h2>B</h2><p>text b</p></body></html>")
+    sections = read_html(f)
+    assert [s.phys_page for s in sections] == list(range(1, len(sections) + 1))
+    assert all(s.total == len(sections) for s in sections)
+
+
+def test_read_html_strips_nav_and_footer(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<nav>Navigation</nav>"
+        "<p>Main content</p>"
+        "<footer>Footer text</footer>"
+        "</body></html>"
+    )
+    sections = read_html(f)
+    all_text = " ".join(s.text for s in sections)
+    assert "Navigation" not in all_text
+    assert "Footer text" not in all_text
+    assert "Main content" in all_text
+
+
+def test_read_html_label_truncated(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(f"<html><body><h1>{'A' * 100}</h1><p>text</p></body></html>")
+    sections = read_html(f)
+    for s in sections:
+        assert len(s.page_label) <= 60
+
+
+def test_read_html_heading_text_not_duplicated_in_body(tmp_path):
+    """Heading text should not appear twice (once as label, once in body)."""
+    f = tmp_path / "doc.html"
+    f.write_text("<html><body><h2>My Section</h2><p>description here</p></body></html>")
+    sections = read_html(f)
+    section = next(s for s in sections if s.page_label == "My Section")
+    # The heading text itself should not be re-emitted as body content
+    assert section.text.count("My Section") == 0
+
+
+# ── _is_notable — stub/TBD flagging (fix #3) ────────────────────────────────
+
+
+def test_is_notable_tbd_uppercase():
+    assert _is_notable("This value is TBD")
+
+
+def test_is_notable_tbd_lowercase():
+    assert _is_notable("value is tbd for now")
+
+
+def test_is_notable_todo():
+    assert _is_notable("// TODO: implement this")
+
+
+def test_is_notable_fixme():
+    assert _is_notable("/* FIXME: broken path */")
+
+
+def test_is_notable_stub_word():
+    assert _is_notable("This is a stub implementation")
+
+
+def test_is_notable_not_implemented_phrase():
+    assert _is_notable("This feature is not implemented yet")
+
+
+def test_is_notable_raise_not_implemented_error():
+    assert _is_notable("    raise NotImplementedError")
+
+
+def test_is_notable_false_on_normal_text():
+    assert not _is_notable("Returns the device allocation for the given node.")
+
+
+def test_is_notable_false_on_empty():
+    assert not _is_notable("")
+
+
+def test_is_notable_stub_not_matched_as_substring():
+    # "stubborn" should not match the \bstub\b pattern
+    assert not _is_notable("stubborn resistance to change")
