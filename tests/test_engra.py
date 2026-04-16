@@ -8,7 +8,9 @@ import pytest
 from engra.commands import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
+    DEFAULT_MIN_SCORE,
     MODEL_NAME,
+    _data_list_members,
     _fetch_linked_results,
     _find_seq_index,
     _format_missing_pages,
@@ -1936,3 +1938,432 @@ def test_search_links_flag_in_cli():
 def test_search_links_flag_default_false():
     ns = _parse_search_args(["search", "my query"])
     assert ns.links is False
+
+
+# ── Section dataclass new fields ──────────────────────────────────────────────
+
+
+def test_section_atomic_default_false():
+    from engra.readers import Section
+
+    s = Section(text="x", phys_page=1, page_label="1", total=1)
+    assert s.atomic is False
+
+
+def test_section_breadcrumb_default_empty():
+    from engra.readers import Section
+
+    s = Section(text="x", phys_page=1, page_label="1", total=1)
+    assert s.breadcrumb == ""
+
+
+def test_section_cross_refs_default_empty():
+    from engra.readers import Section
+
+    s = Section(text="x", phys_page=1, page_label="1", total=1)
+    assert s.cross_refs == []
+
+
+# ── read_html breadcrumb tracking (Feature 3) ────────────────────────────────
+
+
+def test_read_html_breadcrumb_h2_under_h1(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<h1>Animals</h1><p>intro</p>"
+        "<h2>Dogs</h2><p>dog content</p>"
+        "</body></html>"
+    )
+    sections = read_html(f)
+    # Find the Dogs section
+    dogs = next(s for s in sections if s.page_label == "Dogs")
+    assert dogs.breadcrumb == "Animals"
+
+
+def test_read_html_breadcrumb_h3_depth(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<h1>Animals</h1><p>a</p>"
+        "<h2>Dogs</h2><p>b</p>"
+        "<h3>Poodle</h3><p>c</p>"
+        "</body></html>"
+    )
+    sections = read_html(f)
+    poodle = next(s for s in sections if s.page_label == "Poodle")
+    assert poodle.breadcrumb == "Animals > Dogs"
+
+
+def test_read_html_breadcrumb_resets_on_same_level(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<h2>Section A</h2><p>a</p>"
+        "<h2>Section B</h2><p>b</p>"
+        "</body></html>"
+    )
+    sections = read_html(f)
+    b = next(s for s in sections if s.page_label == "Section B")
+    assert b.breadcrumb == ""
+
+
+def test_read_html_root_section_has_empty_breadcrumb(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body><p>preamble</p><h2>First</h2><p>content</p></body></html>"
+    )
+    sections = read_html(f)
+    # The first section (preamble, before any heading) has no breadcrumb
+    assert sections[0].breadcrumb == ""
+
+
+# ── read_html cross-reference extraction (Feature 5) ────────────────────────
+
+
+def test_read_html_extracts_see_also_links(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<h4>myFunction</h4>"
+        "<p>Does something.</p>"
+        '<dl class="section see"><dt>See also</dt>'
+        '<dd><a href="#">Foo::bar</a></dd></dl>'
+        "</body></html>"
+    )
+    sections = read_html(f)
+    assert any("Foo::bar" in s.cross_refs for s in sections)
+
+
+def test_read_html_cross_refs_empty_when_none(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text("<html><body><h2>Section</h2><p>no refs here</p></body></html>")
+    sections = read_html(f)
+    for s in sections:
+        assert s.cross_refs == []
+
+
+def test_read_html_cross_refs_deduped(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<h4>fn</h4>"
+        "<p>Does the thing.</p>"
+        '<dl class="section see"><dt>See also</dt>'
+        '<dd><a href="#">Alpha</a></dd>'
+        '<dd><a href="#">Alpha</a></dd>'
+        "</dl>"
+        "</body></html>"
+    )
+    sections = read_html(f)
+    refs = [r for s in sections for r in s.cross_refs if r == "Alpha"]
+    assert refs.count("Alpha") == 1
+
+
+def test_read_html_cross_refs_not_in_text(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<h4>fn</h4><p>actual content</p>"
+        '<dl class="section see"><dt>See also</dt>'
+        '<dd><a href="#">ShouldNotAppearInText</a></dd></dl>'
+        "</body></html>"
+    )
+    sections = read_html(f)
+    fn_section = next(s for s in sections if s.page_label == "fn")
+    assert "ShouldNotAppearInText" not in fn_section.text
+
+
+# ── read_html atomic section detection (Features 2 & 6) ─────────────────────
+
+
+def test_read_html_h4_section_is_atomic(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body><h4>myMethod</h4><p>description</p></body></html>"
+    )
+    sections = read_html(f)
+    method_section = next(s for s in sections if s.page_label == "myMethod")
+    assert method_section.atomic is True
+
+
+def test_read_html_h2_section_not_atomic_by_default(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body><h2>Overview</h2><p>general text</p></body></html>"
+    )
+    sections = read_html(f)
+    overview = next(s for s in sections if s.page_label == "Overview")
+    assert overview.atomic is False
+
+
+def test_read_html_fieldtable_marks_atomic(tmp_path):
+    f = tmp_path / "doc.html"
+    f.write_text(
+        "<html><body>"
+        "<h2>MyEnum</h2>"
+        '<table class="fieldtable"><tr><td>VALUE_A</td></tr></table>'
+        "</body></html>"
+    )
+    sections = read_html(f)
+    enum_section = next(s for s in sections if s.page_label == "MyEnum")
+    assert enum_section.atomic is True
+
+
+# ── _data_index honors atomic flag (Features 2 & 6) ─────────────────────────
+
+
+def test_data_index_atomic_section_not_split(tmp_path, monkeypatch):
+    """An atomic section longer than CHUNK_SIZE should produce exactly 1 chunk."""
+    from unittest.mock import MagicMock
+
+    import engra.commands as cmd
+    from engra.readers import Section
+
+    long_text = "x" * (CHUNK_SIZE * 3)
+    atomic_section = Section(
+        text=long_text, phys_page=1, page_label="Big", total=1, atomic=True
+    )
+    monkeypatch.setattr(cmd, "read_file", lambda path: [atomic_section])
+    monkeypatch.setattr(cmd, "store_file", lambda path, copy=True: path)
+
+    added_ids = []
+    col = MagicMock()
+    col.count.return_value = 0
+    col.get.return_value = {"ids": [], "metadatas": [], "documents": []}
+    col.add.side_effect = lambda ids, **kwargs: added_ids.extend(ids)
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+
+    import numpy as np
+
+    fake_model = MagicMock()
+    fake_model.embed.return_value = iter([np.zeros(10)])
+    monkeypatch.setattr(cmd, "load_model", lambda: fake_model)
+
+    f = tmp_path / "test.html"
+    f.write_text("dummy")
+    cmd._data_index([f], store=False, auto_describe=False)
+
+    assert len(added_ids) == 1
+
+
+def test_data_index_nonatomic_long_section_is_split(tmp_path, monkeypatch):
+    """A non-atomic section longer than CHUNK_SIZE should produce multiple chunks."""
+    import numpy as np
+    from unittest.mock import MagicMock
+
+    import engra.commands as cmd
+    from engra.readers import Section
+
+    long_text = "y " * (CHUNK_SIZE + 100)
+    section = Section(
+        text=long_text, phys_page=1, page_label="Long", total=1, atomic=False
+    )
+    monkeypatch.setattr(cmd, "read_file", lambda path: [section])
+    monkeypatch.setattr(cmd, "store_file", lambda path, copy=True: path)
+
+    added_ids = []
+    col = MagicMock()
+    col.count.return_value = 0
+    col.get.return_value = {"ids": [], "metadatas": [], "documents": []}
+    col.add.side_effect = lambda ids, **kwargs: added_ids.extend(ids)
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+
+    fake_model = MagicMock()
+    fake_model.embed.return_value = iter([np.zeros(10)] * 20)
+    monkeypatch.setattr(cmd, "load_model", lambda: fake_model)
+
+    f = tmp_path / "test.html"
+    f.write_text("dummy")
+    cmd._data_index([f], store=False, auto_describe=False)
+
+    assert len(added_ids) > 1
+
+
+# ── _data_search new result fields (Batch 1) ─────────────────────────────────
+
+
+def _make_meta_with_new_fields(**overrides):
+    """Build a metadata dict that includes the new breadcrumb/cross_refs fields."""
+    from unittest.mock import MagicMock
+
+    base = {
+        "source": "/tmp/doc.html",
+        "filename": "doc.html",
+        "page": 1,
+        "page_label": "MyClass",
+        "total_pages": 5,
+        "chunk": 0,
+        "project": "proj",
+        "indexed_at": "2026-01-01T00:00:00+00:00",
+        "source_mtime": 1234567890.0,
+        "model": "intfloat/multilingual-e5-large",
+        "chunk_size": 1500,
+        "chunk_overlap": 200,
+        "breadcrumb": "Namespace > MyClass",
+        "cross_refs": "Foo::bar,Baz::qux",
+    }
+    base.update(overrides)
+    return base
+
+
+def _make_search_col(meta):
+    from unittest.mock import MagicMock
+
+    col = MagicMock()
+    col.count.return_value = 1
+    col.get.return_value = {"metadatas": [meta], "documents": ["text"], "ids": ["id1"]}
+    col.query.return_value = {
+        "documents": [["text"]],
+        "metadatas": [[meta]],
+        "distances": [[0.1]],
+        "ids": [["id1"]],
+    }
+    return col
+
+
+def test_data_search_returns_breadcrumb_field(monkeypatch):
+    import engra.commands as cmd
+
+    meta = _make_meta_with_new_fields()
+    monkeypatch.setattr(cmd, "get_collection", lambda: _make_search_col(meta))
+    monkeypatch.setattr(cmd, "load_model", lambda: _make_fake_model())
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    results = cmd._data_search("query")
+    assert results[0]["breadcrumb"] == "Namespace > MyClass"
+
+
+def test_data_search_returns_cross_references_field(monkeypatch):
+    import engra.commands as cmd
+
+    meta = _make_meta_with_new_fields()
+    monkeypatch.setattr(cmd, "get_collection", lambda: _make_search_col(meta))
+    monkeypatch.setattr(cmd, "load_model", lambda: _make_fake_model())
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    results = cmd._data_search("query")
+    assert results[0]["cross_references"] == ["Foo::bar", "Baz::qux"]
+
+
+def test_data_search_cross_references_empty_when_meta_missing(monkeypatch):
+    import engra.commands as cmd
+
+    meta = _make_meta_with_new_fields(cross_refs="")
+    monkeypatch.setattr(cmd, "get_collection", lambda: _make_search_col(meta))
+    monkeypatch.setattr(cmd, "load_model", lambda: _make_fake_model())
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    results = cmd._data_search("query")
+    assert results[0]["cross_references"] == []
+
+
+# ── DEFAULT_MIN_SCORE (Feature 1) ────────────────────────────────────────────
+
+
+def test_default_min_score_value():
+    assert DEFAULT_MIN_SCORE == 0.3
+
+
+# ── _data_list_members (Feature 4) ──────────────────────────────────────────
+
+
+def _make_list_members_col(metas, docs=None):
+    from unittest.mock import MagicMock
+
+    docs = docs or ["text"] * len(metas)
+    col = MagicMock()
+    col.count.return_value = len(metas)
+    col.get.return_value = {"metadatas": metas, "documents": docs, "ids": [f"id{i}" for i in range(len(metas))]}
+    return col
+
+
+def test_data_list_members_empty_db(monkeypatch):
+    from unittest.mock import MagicMock
+
+    import engra.commands as cmd
+
+    col = MagicMock()
+    col.count.return_value = 0
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    assert _data_list_members("doc.html") == []
+
+
+def test_data_list_members_groups_by_section(monkeypatch):
+    import engra.commands as cmd
+
+    metas = [
+        {"page": 1, "page_label": "MyClass", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
+        {"page": 1, "page_label": "MyClass", "chunk": 1, "filename": "doc.html", "breadcrumb": ""},
+    ]
+    docs = ["chunk0 text", "chunk1 text"]
+    col = _make_list_members_col(metas, docs)
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    result = _data_list_members("doc.html")
+    assert len(result) == 1
+    assert result[0]["section"] == "MyClass"
+    assert len(result[0]["chunks"]) == 2
+
+
+def test_data_list_members_multiple_sections_sorted(monkeypatch):
+    import engra.commands as cmd
+
+    metas = [
+        {"page": 2, "page_label": "BSection", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
+        {"page": 1, "page_label": "ASection", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
+    ]
+    col = _make_list_members_col(metas)
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    result = _data_list_members("doc.html")
+    assert len(result) == 2
+    assert result[0]["page"] == 1  # sorted by page
+
+
+def test_data_list_members_section_filter_substring(monkeypatch):
+    import engra.commands as cmd
+
+    metas = [
+        {"page": 1, "page_label": "Dogs overview", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
+        {"page": 2, "page_label": "Cats overview", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
+    ]
+    col = _make_list_members_col(metas)
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    result = _data_list_members("doc.html", section_filter="dogs")
+    assert len(result) == 1
+    assert result[0]["section"] == "Dogs overview"
+
+
+def test_data_list_members_section_filter_case_insensitive(monkeypatch):
+    import engra.commands as cmd
+
+    metas = [
+        {"page": 1, "page_label": "Dogs overview", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
+    ]
+    col = _make_list_members_col(metas)
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    result = _data_list_members("doc.html", section_filter="DOGS")
+    assert len(result) == 1
+
+
+def test_data_list_members_returns_breadcrumb_in_chunks(monkeypatch):
+    import engra.commands as cmd
+
+    metas = [
+        {"page": 1, "page_label": "Foo", "chunk": 0, "filename": "doc.html", "breadcrumb": "NS > Class"},
+    ]
+    col = _make_list_members_col(metas, ["content"])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    result = _data_list_members("doc.html")
+    assert result[0]["chunks"][0]["breadcrumb"] == "NS > Class"

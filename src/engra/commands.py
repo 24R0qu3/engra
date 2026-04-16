@@ -44,6 +44,7 @@ MODEL_NAME = "intfloat/multilingual-e5-large"
 MIN_CHARS = 80
 CHUNK_SIZE = 1500
 CHUNK_OVERLAP = 200
+DEFAULT_MIN_SCORE = 0.3  # MCP engra_search default; below this is treated as "not found"
 
 _NOTABLE_PATTERN = re.compile(
     r"\b(TBD|TODO|FIXME|stub)\b|not\s+implemented|raise\s+NotImplementedError",
@@ -451,8 +452,10 @@ def _data_index(
         for section in sections:
             if len(section.text) < MIN_CHARS:
                 continue
-            for chunk_idx, chunk in enumerate(chunk_text(section.text)):
-                chunk_texts.append(chunk)
+            raw_chunks = [section.text] if section.atomic else chunk_text(section.text)
+            for chunk_idx, chunk in enumerate(raw_chunks):
+                doc_text = f"{section.breadcrumb}\n{chunk}" if section.breadcrumb else chunk
+                chunk_texts.append(doc_text)
                 chunk_metas.append(
                     {
                         "source": str(file_path.resolve()),
@@ -468,6 +471,8 @@ def _data_index(
                         "chunk_size": CHUNK_SIZE,
                         "chunk_overlap": CHUNK_OVERLAP,
                         "links_to": ",".join(section.links_to),
+                        "breadcrumb": section.breadcrumb,
+                        "cross_refs": ",".join(section.cross_refs),
                     }
                 )
 
@@ -608,6 +613,8 @@ def _fetch_linked_results(
                 "notable": _is_notable(text),
                 "links_to": meta.get("links_to", ""),
                 "linked_from": source_names,
+                "breadcrumb": meta.get("breadcrumb", ""),
+                "cross_references": [r for r in meta.get("cross_refs", "").split(",") if r],
             }
         )
 
@@ -687,6 +694,8 @@ def _data_search(
                 "notable": _is_notable(text),
                 "links_to": meta.get("links_to", ""),
                 "linked_from": [],
+                "breadcrumb": meta.get("breadcrumb", ""),
+                "cross_references": [r for r in meta.get("cross_refs", "").split(",") if r],
             }
         )
 
@@ -730,6 +739,7 @@ def _data_get_chunks(
             "chunk_idx": meta.get("chunk", 0),
             "text": text,
             "source": meta.get("source", ""),
+            "breadcrumb": meta.get("breadcrumb", ""),
         }
         for meta, text in all_pairs
     ]
@@ -945,6 +955,58 @@ def _data_project_deactivate() -> dict:
     """Clear the active session. Returns {active_projects: []}."""
     clear_session()
     return {"active_projects": []}
+
+
+def _data_list_members(
+    filename: str,
+    projects: list[str] | None = None,
+    section_filter: str | None = None,
+) -> list[dict]:
+    """Return all indexed sections for a file, grouped by section heading (page_label).
+
+    Useful for structured browsing or absence-checking without a similarity query.
+    projects=None uses the active session; [] searches globally.
+    section_filter: case-insensitive substring match on section label.
+
+    Returns list of {section, page, chunks: [{chunk_idx, text, breadcrumb}]}.
+    """
+    from collections import defaultdict
+
+    col = get_collection()
+    if col.count() == 0:
+        return []
+
+    active_projects = projects if projects is not None else read_session()
+    where = _build_where(active_projects, filename)
+    if where is None:
+        where = {"filename": filename}
+
+    result = col.get(where=where, include=["documents", "metadatas"])
+    docs: list[str] = result.get("documents") or []
+    metas: list[dict] = result.get("metadatas") or []
+    if not docs:
+        return []
+
+    sections: dict[tuple[int, str], list[dict]] = defaultdict(list)
+    for doc, meta in sorted(
+        zip(docs, metas), key=lambda x: (x[1].get("page", 0), x[1].get("chunk", 0))
+    ):
+        label = meta.get("page_label", str(meta.get("page", 0)))
+        if section_filter and section_filter.lower() not in label.lower():
+            continue
+        key = (meta.get("page", 0), label)
+        sections[key].append(
+            {
+                "chunk_idx": meta.get("chunk", 0),
+                "text": doc,
+                "breadcrumb": meta.get("breadcrumb", ""),
+            }
+        )
+
+    return [
+        {"section": label, "page": page, "chunks": chunks}
+        for (page, label), chunks in sorted(sections.items())
+    ]
 
 
 EXPORT_FORMAT_VERSION = 2

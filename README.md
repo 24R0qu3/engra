@@ -270,7 +270,19 @@ The `--print-config` output looks like:
 }
 ```
 
-For Claude Code, add this to `.claude/settings.json` (or run `engra mcp --print-config` and follow the prompt).
+**Claude Code** — register it in one command:
+
+```bash
+claude mcp add engra -- engra mcp
+```
+
+Or to install it globally for all projects:
+
+```bash
+claude mcp add --scope user engra -- engra mcp
+```
+
+Alternatively, add the snippet above manually to `.claude/settings.json` (or run `engra mcp --print-config` and follow the prompt).
 
 ## Listing and removing documents
 

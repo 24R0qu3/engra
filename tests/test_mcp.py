@@ -495,7 +495,7 @@ def _import_mcp_server():
     return ms
 
 
-def test_mcp_list_tools_returns_all_eleven():
+def test_mcp_list_tools_returns_all_twelve():
     import asyncio
 
     ms = _import_mcp_server()
@@ -507,6 +507,7 @@ def test_mcp_list_tools_returns_all_eleven():
         "engra_get_neighbors",
         "engra_list_projects",
         "engra_list_files",
+        "engra_list_members",
         "engra_index",
         "engra_info",
         "engra_project_activate",
@@ -601,3 +602,106 @@ def test_mcp_list_projects_dispatch(monkeypatch):
     results = asyncio.run(ms.server._call_tool_fn("engra_list_projects", {}))
     data = json.loads(results[0].text)
     assert isinstance(data, list)
+
+
+# ── DEFAULT_MIN_SCORE applied by engra_search (Feature 1) ────────────────────
+
+
+def test_mcp_search_default_min_score_applied(monkeypatch):
+    """When min_score is not passed, engra_search should use DEFAULT_MIN_SCORE."""
+    import asyncio
+
+    import engra.commands as cmd
+    from engra.commands import DEFAULT_MIN_SCORE
+
+    captured = {}
+
+    def fake_search(**kwargs):
+        captured["min_score"] = kwargs.get("min_score")
+        return []
+
+    col = _col([META])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "test"}))
+    assert captured["min_score"] == DEFAULT_MIN_SCORE
+
+
+def test_mcp_search_explicit_min_score_overrides(monkeypatch):
+    """An explicit min_score of 0.0 should override the default."""
+    import asyncio
+
+    import engra.commands as cmd
+
+    captured = {}
+
+    def fake_search(**kwargs):
+        captured["min_score"] = kwargs.get("min_score")
+        return []
+
+    col = _col([META])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "test", "min_score": 0.0}))
+    assert captured["min_score"] == 0.0
+
+
+# ── engra_list_members dispatch (Feature 4) ──────────────────────────────────
+
+META_WITH_LABEL = {
+    **META,
+    "page_label": "MyClass",
+    "breadcrumb": "NS > MyClass",
+    "cross_refs": "",
+}
+
+
+def test_mcp_list_members_dispatch(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    col = _col([META_WITH_LABEL])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    ms = _import_mcp_server()
+    results = asyncio.run(
+        ms.server._call_tool_fn("engra_list_members", {"filename": "doc.pdf"})
+    )
+    data = json.loads(results[0].text)
+    assert isinstance(data, list)
+
+
+def test_mcp_list_members_passes_section_filter(monkeypatch):
+    """section_filter argument should be forwarded to _data_list_members."""
+    import asyncio
+
+    import engra.commands as cmd
+
+    captured = {}
+
+    def fake_list_members(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    col = _col([META_WITH_LABEL])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+    monkeypatch.setattr(cmd, "_data_list_members", fake_list_members)
+
+    ms = _import_mcp_server()
+    asyncio.run(
+        ms.server._call_tool_fn(
+            "engra_list_members",
+            {"filename": "doc.pdf", "section_filter": "My"},
+        )
+    )
+    assert captured.get("section_filter") == "My"
+    assert captured.get("filename") == "doc.pdf"

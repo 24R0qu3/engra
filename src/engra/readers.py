@@ -17,6 +17,9 @@ class Section:
     page_label: str  # human-readable label used in citations
     total: int  # total sections in this document
     links_to: list[str] = field(default_factory=list)  # basenames of linked HTML files
+    atomic: bool = False  # if True: store entire section as one chunk, never split
+    breadcrumb: str = ""  # hierarchical heading path, e.g. "Namespace > ClassName"
+    cross_refs: list[str] = field(default_factory=list)  # @see / related symbol names
 
 
 def _make_sections(parts: list[tuple[str, str]]) -> list[Section]:
@@ -144,6 +147,59 @@ def _extract_html_links(soup, source_name: str | None = None) -> list[str]:
     return sorted(seen)
 
 
+def _process_section_nodes(
+    nodes: list, heading_level: int
+) -> tuple[str, list[str], bool]:
+    """Extract text, cross-references, and atomic status from a list of BeautifulSoup nodes.
+
+    Returns (text, cross_refs, is_atomic).
+    is_atomic is True for h4-level sections (single-declaration in Doxygen) and for
+    sections containing a Doxygen enum fieldtable or dl.enum element.
+    Cross-refs are extracted from <dl class="section see"> blocks and removed from text.
+    """
+    from bs4 import NavigableString, Tag
+
+    lines: list[str] = []
+    cross_refs: list[str] = []
+    is_atomic = heading_level >= 4  # h4 = single-declaration in Doxygen
+
+    for node in nodes:
+        if isinstance(node, Tag):
+            node_classes = set(node.get("class") or [])
+            # If this node itself is a top-level @see block, extract refs and skip
+            if node.name == "dl" and {"section", "see"} <= node_classes:
+                for item in node.find_all(["a", "dd"]):
+                    ref = item.get_text(" ", strip=True)
+                    if ref:
+                        cross_refs.append(ref)
+                continue  # do not include @see text in section body
+            # Extract nested @see cross-refs, remove them before text flattening
+            for dl in node.find_all("dl", class_="section see"):
+                for item in dl.find_all(["a", "dd"]):
+                    ref = item.get_text(" ", strip=True)
+                    if ref:
+                        cross_refs.append(ref)
+                dl.decompose()
+            # Doxygen enum fieldtable or explicit enum dl → treat section as atomic
+            # Check both the node itself and any nested matches
+            is_fieldtable = node.name == "table" and "fieldtable" in node_classes
+            is_enum_dl = node.name == "dl" and "enum" in node_classes
+            if is_fieldtable or is_enum_dl or node.find("table", class_="fieldtable") or node.find("dl", class_="enum"):
+                is_atomic = True
+            # Flatten remaining text
+            for child in node.descendants:
+                if isinstance(child, NavigableString):
+                    line = str(child).strip()
+                    if line:
+                        lines.append(line)
+        elif isinstance(node, NavigableString):
+            line = str(node).strip()
+            if line:
+                lines.append(line)
+
+    return "\n".join(lines).strip(), sorted(set(cross_refs)), is_atomic
+
+
 def read_html(path: Path) -> list[Section]:
     from bs4 import BeautifulSoup, NavigableString, Tag
 
@@ -156,38 +212,90 @@ def read_html(path: Path) -> list[Section]:
         tag.decompose()
 
     heading_tags = {"h1", "h2", "h3", "h4"}
+    heading_level_map = {"h1": 1, "h2": 2, "h3": 3, "h4": 4}
     default_label = (
         soup.title.string.strip()[:60] if soup.title and soup.title.string else path.stem
     )
 
-    parts: list[tuple[str, str]] = []
-    current_lines: list[str] = []
+    # parts: (text, label, breadcrumb, atomic, cross_refs)
+    parts: list[tuple[str, str, str, bool, list[str]]] = []
+    current_nodes: list = []
     current_label = default_label
+    current_level = 0
+    heading_stack: list[tuple[int, str]] = []  # (level, label)
 
     root = soup.body or soup
-    for node in root.descendants:
+    for node in root.children:
         if isinstance(node, Tag) and node.name in heading_tags:
-            text = "\n".join(current_lines).strip()
-            if text:
-                parts.append((text, current_label))
-            current_label = node.get_text(" ", strip=True)[:60] or current_label
-            current_lines = []
-        elif isinstance(node, NavigableString) and not any(
-            isinstance(p, Tag) and p.name in heading_tags for p in node.parents
-        ):
-            line = str(node).strip()
-            if line:
-                current_lines.append(line)
+            # Flush accumulated section
+            text, xrefs, atomic = _process_section_nodes(current_nodes, current_level)
+            if text.strip():
+                bc = " > ".join(lbl for _, lbl in heading_stack[:-1])
+                parts.append((text, current_label, bc, atomic, xrefs))
+            # Update heading stack: pop levels >= current heading level
+            level = heading_level_map[node.name]
+            heading_stack = [(l, lbl) for l, lbl in heading_stack if l < level]
+            new_label = node.get_text(" ", strip=True)[:60] or current_label
+            heading_stack.append((level, new_label))
+            current_label, current_level, current_nodes = new_label, level, []
+        else:
+            current_nodes.append(node)
 
-    text = "\n".join(current_lines).strip()
-    if text:
-        parts.append((text, current_label))
+    # Flush final section
+    text, xrefs, atomic = _process_section_nodes(current_nodes, current_level)
+    if text.strip():
+        bc = " > ".join(lbl for _, lbl in heading_stack[:-1])
+        parts.append((text, current_label, bc, atomic, xrefs))
 
-    parts = [(t, lbl) for t, lbl in parts if t.strip()]
-    sections = _make_sections(parts) if parts else read_text(path)
-    if links:
-        for s in sections:
-            s.links_to = links
+    parts = [(t, lbl, bc, at, xr) for t, lbl, bc, at, xr in parts if t.strip()]
+
+    # Fallback: if top-level children traversal found nothing (headings nested in divs),
+    # fall back to the descendants-based approach without the new features.
+    if not parts:
+        # Re-parse from scratch since we may have mutated the soup above
+        soup2 = BeautifulSoup(html, "html.parser")
+        for tag in soup2(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        fallback_parts: list[tuple[str, str]] = []
+        fb_lines: list[str] = []
+        fb_label = default_label
+        for node in (soup2.body or soup2).descendants:
+            if isinstance(node, Tag) and node.name in heading_tags:
+                fb_text = "\n".join(fb_lines).strip()
+                if fb_text:
+                    fallback_parts.append((fb_text, fb_label))
+                fb_label = node.get_text(" ", strip=True)[:60] or fb_label
+                fb_lines = []
+            elif isinstance(node, NavigableString) and not any(
+                isinstance(p, Tag) and p.name in heading_tags for p in node.parents
+            ):
+                line = str(node).strip()
+                if line:
+                    fb_lines.append(line)
+        fb_text = "\n".join(fb_lines).strip()
+        if fb_text:
+            fallback_parts.append((fb_text, fb_label))
+        fallback_parts = [(t, lbl) for t, lbl in fallback_parts if t.strip()]
+        sections = _make_sections(fallback_parts) if fallback_parts else read_text(path)
+        if links:
+            for s in sections:
+                s.links_to = links
+        return sections
+
+    total = len(parts)
+    sections = [
+        Section(
+            text=t,
+            phys_page=i + 1,
+            page_label=lbl,
+            total=total,
+            links_to=links,
+            breadcrumb=bc,
+            atomic=at,
+            cross_refs=xr,
+        )
+        for i, (t, lbl, bc, at, xr) in enumerate(parts)
+    ]
     return sections
 
 

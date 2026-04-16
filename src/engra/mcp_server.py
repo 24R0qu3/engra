@@ -24,11 +24,13 @@ except ImportError as _exc:
     ) from _exc
 
 from engra.commands import (
+    DEFAULT_MIN_SCORE,
     _data_get_chunks,
     _data_get_neighbors,
     _data_index,
     _data_info,
     _data_list_files,
+    _data_list_members,
     _data_list_projects,
     _data_project_activate,
     _data_project_autodescribe,
@@ -69,8 +71,11 @@ async def list_tools() -> list[mcp_types.Tool]:
                     "top": {"type": "integer", "default": 5, "description": "Max results"},
                     "min_score": {
                         "type": "number",
-                        "default": 0.0,
-                        "description": "Minimum similarity 0–1",
+                        "default": DEFAULT_MIN_SCORE,
+                        "description": (
+                            f"Minimum similarity score 0–1. Defaults to {DEFAULT_MIN_SCORE} "
+                            "to suppress low-confidence matches. Pass 0.0 to see all results."
+                        ),
                     },
                     "filename": {
                         "type": ["string", "null"],
@@ -154,6 +159,36 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "description": "Filter by project",
                     },
                 },
+            },
+        ),
+        mcp_types.Tool(
+            name="engra_list_members",
+            description=(
+                "List all indexed sections for a file, grouped by section heading. "
+                "Use for structured browsing or absence-checking "
+                "(e.g. 'does class X have a callback for Y?') without a similarity query. "
+                "projects=null uses the active session; pass [] to search globally."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "filename": {
+                        "type": "string",
+                        "description": "Filename to browse (as stored in the index)",
+                    },
+                    "projects": {
+                        "type": ["array", "null"],
+                        "items": {"type": "string"},
+                        "default": None,
+                        "description": "Restrict to these projects (null = use active session)",
+                    },
+                    "section_filter": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": "Case-insensitive substring to filter section labels",
+                    },
+                },
+                "required": ["filename"],
             },
         ),
         mcp_types.Tool(
@@ -273,7 +308,7 @@ def _dispatch(name: str, args: dict):
         return _data_search(
             query=args["query"],
             top_k=args.get("top", 5),
-            min_score=args.get("min_score", 0.0),
+            min_score=args.get("min_score", DEFAULT_MIN_SCORE),
             filename=args.get("filename"),
             projects=args.get("projects"),
         )
@@ -295,6 +330,12 @@ def _dispatch(name: str, args: dict):
         )
     elif name == "engra_list_projects":
         return _data_list_projects()
+    elif name == "engra_list_members":
+        return _data_list_members(
+            filename=args["filename"],
+            projects=args.get("projects"),
+            section_filter=args.get("section_filter"),
+        )
     elif name == "engra_list_files":
         return _data_list_files(project=args.get("project"))
     elif name == "engra_index":
