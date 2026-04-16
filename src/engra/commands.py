@@ -3,6 +3,7 @@ import hashlib
 import logging
 import re
 import sys
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,6 +17,7 @@ from rich.progress import (
     SpinnerColumn,
     TaskProgressColumn,
     TextColumn,
+    TimeElapsedColumn,
 )
 from rich.table import Table
 
@@ -275,8 +277,13 @@ def load_model():
         try:
             return TextEmbedding(MODEL_NAME, **kwargs)
         except Exception as exc:
+            import sys
+            venv_python = sys.executable
             console.print(
-                f"[yellow]Warning:[/yellow] provider '{provider}' unavailable ({exc}), falling back to CPU"
+                f"[yellow]Warning:[/yellow] provider '{provider}' unavailable, falling back to CPU.\n"
+                f"  To fix, run:\n"
+                f"  [bold]{venv_python} -m pip install onnxruntime-gpu "
+                f"--extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/[/bold]"
             )
             del kwargs["providers"]
 
@@ -479,6 +486,7 @@ def _data_index(
     auto_describe: bool = True,
     on_progress: Callable[[int, int, str], None] | None = None,
     on_file_done: Callable[[str, str], None] | None = None,
+    profile: bool = False,
 ) -> dict:
     """Index files. Returns {total_chunks, results: [{path, filename, status, ...}]}.
 
@@ -486,6 +494,7 @@ def _data_index(
     on_progress(done, total, filename) is called after each chunk is embedded.
     on_file_done(filename, status) is called once per file with its terminal status.
     Raises RuntimeError on KeyboardInterrupt (cleaned up, no partial data).
+    When profile=True, the returned dict includes a 'timings' key with per-phase seconds.
     """
     collection = get_collection()
     model = load_model()
@@ -498,15 +507,32 @@ def _data_index(
     # Collect sample chunk texts per project for auto-description
     project_sample_chunks: dict[str, list[str]] = {}
 
+    # Fetch all already-indexed source paths in one query instead of one per file
+    _t_pre = time.perf_counter()
+    if not force:
+        _all_metas = collection.get(include=["metadatas"])["metadatas"] or []
+        already_indexed: set[str] = {m["source"] for m in _all_metas if m.get("source")}
+    else:
+        already_indexed = set()
+    t_chroma_query: float = time.perf_counter() - _t_pre
+
+    # Phase timers (seconds — t_chroma_query initialised above with upfront query cost)
+    t_embed: float = 0.0          # model.embed (ONNX inference)
+    t_chroma_write: float = 0.0   # collection.add (storing vectors)
+    # Note: read+parse+chunk runs in background and overlaps with embed, so we
+    # measure it as the wall time the future takes beyond the embed phase.
+    t_read_parse: float = 0.0     # fut.result() wait time (background read+chunk)
+
     _pending: tuple | None = None  # (Future, file_path, entry, proj, reindexed, store_action)
 
     def _process_pending() -> None:
-        nonlocal _pending
+        nonlocal _pending, t_read_parse, t_embed, t_chroma_write
         if _pending is None:
             return
         fut, fp, entry, proj, reindexed, store_action = _pending
         _pending = None
 
+        _t0 = time.perf_counter()
         try:
             total_sections, chunk_texts, chunk_metas = fut.result()
         except Exception as exc:
@@ -514,6 +540,7 @@ def _data_index(
             if on_file_done:
                 on_file_done(fp.name, "error")
             return
+        t_read_parse += time.perf_counter() - _t0
 
         ids: list[str] = []
         embeddings: list[list[float]] = []
@@ -523,6 +550,7 @@ def _data_index(
 
         try:
             embed_cfg = load_config().get("embedding", {})
+            _t0 = time.perf_counter()
             embed_gen = model.embed(chunk_texts, batch_size=embed_cfg.get("batch_size", 64))
             for doc_text, meta, embedding in zip(chunk_texts, chunk_metas, embed_gen):
                 ids.append(f"{prefix}_p{meta['page']}_c{meta['chunk']}")
@@ -531,6 +559,7 @@ def _data_index(
                 metadatas.append(meta)
                 if on_progress:
                     on_progress(len(ids), len(chunk_texts), fp.name)
+            t_embed += time.perf_counter() - _t0
         except KeyboardInterrupt:
             partial = collection.get(where={"source": str(fp.resolve())})
             if partial["ids"]:
@@ -538,7 +567,8 @@ def _data_index(
             raise RuntimeError(f"Interrupted while indexing {fp.name}. No partial data left.")
 
         if ids:
-            batch = 100
+            batch = 500
+            _t0 = time.perf_counter()
             for i in range(0, len(ids), batch):
                 collection.add(
                     ids=ids[i : i + batch],
@@ -546,6 +576,7 @@ def _data_index(
                     documents=documents[i : i + batch],
                     metadatas=metadatas[i : i + batch],
                 )
+            t_chroma_write += time.perf_counter() - _t0
 
         sections_indexed = len({m["page"] for m in metadatas})
         results.append(
@@ -595,23 +626,24 @@ def _data_index(
 
             proj = project or default_project(file_path)
             prefix = doc_id_prefix(file_path)
-            existing = collection.get(where={"source": str(file_path.resolve())})
 
-            if existing["ids"] and not force:
+            reindexed = False
+            source_key = str(file_path.resolve())
+            if not force and source_key in already_indexed:
                 results.append(
                     {
                         **entry,
                         "status": "skipped",
-                        "reason": f"already indexed ({len(existing['ids'])} chunks)",
+                        "reason": "already indexed",
                     }
                 )
                 if on_file_done:
                     on_file_done(file_path.name, "skipped")
                 continue
-
-            reindexed = False
-            if existing["ids"]:
-                collection.delete(ids=existing["ids"])
+            if force or source_key in already_indexed:
+                _t0 = time.perf_counter()
+                collection.delete(where={"source": source_key})
+                t_chroma_query += time.perf_counter() - _t0
                 reindexed = True
 
             store_action: str | None = None
@@ -649,7 +681,13 @@ def _data_index(
                     desc_ad, kws_ad = result_ad
                     update_project_meta(proj_name, auto_description=desc_ad, auto_keywords=kws_ad)
 
-    return {"total_chunks": collection.count(), "results": results}
+    timings = {
+        "chroma_query_s": round(t_chroma_query, 3),
+        "read_parse_s": round(t_read_parse, 3),
+        "embed_s": round(t_embed, 3),
+        "chroma_write_s": round(t_chroma_write, 3),
+    }
+    return {"total_chunks": collection.count(), "results": results, "timings": timings}
 
 
 def _fetch_linked_results(
@@ -1243,6 +1281,7 @@ def cmd_index(
     description: str | None = None,
     auto_describe: bool = True,
     check: bool = False,
+    profile: bool = False,
 ) -> None:
     cfg = load_config()
 
@@ -1298,11 +1337,13 @@ def cmd_index(
     n_total = len(expanded)
     is_multi = n_total > 1
 
+    t0 = time.monotonic()
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TaskProgressColumn(),
+        TimeElapsedColumn(),
         console=console,
     ) as progress:
         if is_multi:
@@ -1363,6 +1404,7 @@ def cmd_index(
                 auto_describe=auto_describe,
                 on_progress=on_progress,
                 on_file_done=on_file_done if is_multi else None,
+                profile=profile,
             )
         except RuntimeError as exc:
             console.print(f"\n[red][interrupted][/red] {exc}")
@@ -1432,7 +1474,27 @@ def cmd_index(
                     f"→ project [cyan]{r['project']}[/cyan]"
                 )
 
-    console.print(f"\nKnowledge base: [bold]{result['total_chunks']} chunks[/bold] total.")
+    elapsed = time.monotonic() - t0
+    elapsed_str = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed) // 60}m {int(elapsed) % 60}s"
+    console.print(
+        f"\nKnowledge base: [bold]{result['total_chunks']} chunks[/bold] total"
+        f"  [dim]({elapsed_str})[/dim]"
+    )
+
+    if profile:
+        t = result["timings"]
+        total_tracked = t["chroma_query_s"] + t["read_parse_s"] + t["embed_s"] + t["chroma_write_s"]
+        console.print("\n[bold]Timing breakdown[/bold]")
+        rows = [
+            ("ChromaDB existence checks", t["chroma_query_s"]),
+            ("Read + parse + chunk (background)", t["read_parse_s"]),
+            ("ONNX embedding inference", t["embed_s"]),
+            ("ChromaDB write (collection.add)", t["chroma_write_s"]),
+        ]
+        for label, secs in rows:
+            pct = secs / total_tracked * 100 if total_tracked > 0 else 0
+            bar = "█" * int(pct / 2)
+            console.print(f"  {label:<38} {secs:6.1f}s  {pct:4.0f}%  {bar}")
 
 
 def cmd_search(
@@ -2311,6 +2373,60 @@ def cmd_import_soft(source_dir: Path, project: str | None = None) -> None:
         f"as project [bold]{effective_project}[/bold] (symlinking files)[/dim]"
     )
     cmd_index([source_dir], copy=False, store=True, project=effective_project)
+
+
+_ORT_GPU_INDEX = (
+    "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
+)
+
+
+def cmd_setup_gpu() -> None:
+    """Install the correct onnxruntime-gpu wheel for CUDA 12 GPU inference.
+
+    fastembed-gpu pulls in the lightweight add-on onnxruntime-gpu from PyPI, which
+    only provides CUDA provider .so files. This command replaces it with the full
+    standalone GPU wheel (252 MB) that includes Python bindings + CUDA support.
+
+    Run once after every: pipx install "engra[gpu]" --force
+    """
+    import subprocess
+
+    try:
+        import onnxruntime as ort
+        if "CUDAExecutionProvider" in ort.get_available_providers():
+            console.print("[green]CUDA already available[/green] — nothing to do.")
+            return
+    except Exception:
+        pass
+
+    console.print("Installing full onnxruntime-gpu wheel for CUDA 12…")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m", "pip", "install",
+            "onnxruntime-gpu",
+            "--no-deps",
+            "--force-reinstall",
+            "--extra-index-url", _ORT_GPU_INDEX,
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        console.print("[red]Installation failed.[/red] Check the output above.")
+        raise SystemExit(1)
+
+    # Verify
+    import importlib
+    import onnxruntime as ort  # noqa: PLC0415
+    importlib.reload(ort)
+    providers = ort.get_available_providers()
+    if "CUDAExecutionProvider" in providers:
+        console.print("[green]Done.[/green] CUDAExecutionProvider is now available.")
+    else:
+        console.print(
+            "[yellow]Installed, but CUDAExecutionProvider still not detected.[/yellow]\n"
+            "Check that cuDNN 9 is installed: [bold]sudo apt install libcudnn9-cuda-12[/bold]"
+        )
 
 
 def cmd_mcp() -> None:

@@ -23,6 +23,7 @@ from engra.commands import (  # noqa: E402
     cmd_info,
     cmd_list,
     cmd_mcp,
+    cmd_setup_gpu,
     cmd_project_activate,
     cmd_project_active,
     cmd_project_autodescribe,
@@ -79,6 +80,11 @@ def run() -> None:
         "--check",
         action="store_true",
         help="Report stale or missing source files without re-indexing",
+    )
+    p_index.add_argument(
+        "--profile",
+        action="store_true",
+        help="Print per-phase timing breakdown after indexing",
     )
     store_group = p_index.add_mutually_exclusive_group()
     store_group.add_argument("--link", action="store_true", help="Symlink files instead of copying")
@@ -201,6 +207,12 @@ def run() -> None:
 
     # list
     sub.add_parser("list", help="List indexed documents")
+
+    # setup-gpu
+    sub.add_parser(
+        "setup-gpu",
+        help="Install the correct onnxruntime-gpu wheel for CUDA 12 (run after pipx install '[gpu]' --force)",
+    )
 
     # mcp
     p_mcp = sub.add_parser("mcp", help="Start MCP stdio server (requires pip install 'engra[mcp]')")
@@ -328,6 +340,7 @@ def run() -> None:
                 project=args.project,
                 description=args.description,
                 auto_describe=not args.no_autodescribe,
+                profile=args.profile,
             )
     elif args.cmd == "search":
         cmd_search(
@@ -369,6 +382,8 @@ def run() -> None:
         cmd_info(filename=args.file)
     elif args.cmd == "list":
         cmd_list()
+    elif args.cmd == "setup-gpu":
+        cmd_setup_gpu()
     elif args.cmd == "mcp":
         if args.mcp_print_config:
             import json

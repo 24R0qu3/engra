@@ -22,7 +22,9 @@ dependencies = [
 engra = "engra.main:run"
 
 [project.optional-dependencies]
-gpu = ["fastembed-gpu"]  # replaces fastembed; run: pip install ".[gpu]"
+gpu = ["fastembed-gpu"]  # run: pipx install ".[gpu]" --force
+# After GPU install, upgrade onnxruntime-gpu to the full CUDA 12 wheel:
+# python -m pip install onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
 mcp = ["mcp>=1.0,<2.0"]  # MCP stdio server: pip install ".[mcp]"
 ai = ["anthropic>=0.40.0"]  # Claude auto-description: pip install ".[ai]"
 rerank = ["flashrank"]  # cross-encoder re-ranking: pip install ".[rerank]"

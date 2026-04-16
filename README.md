@@ -97,6 +97,27 @@ pipx inject engra mcp                  # add MCP server support
 pipx inject engra anthropic            # add Claude auto-description (needs ANTHROPIC_API_KEY)
 ```
 
+#### GPU setup (CUDA 12 — Linux)
+
+After installing with `[gpu]`, run once to install the full CUDA 12 onnxruntime wheel:
+
+```bash
+engra setup-gpu
+```
+
+`fastembed-gpu` pulls in a lightweight add-on `onnxruntime-gpu` from PyPI that only provides
+the CUDA provider `.so` files. `engra setup-gpu` replaces it with the full standalone GPU wheel
+(252 MB) that includes Python bindings + CUDA 12 support.
+
+**Requirements:** CUDA 12.x and cuDNN 9 must be installed.
+```bash
+# Ubuntu / Debian (add NVIDIA repo first if needed)
+sudo apt install libcudnn9-cuda-12
+```
+
+Re-run `engra setup-gpu` after every `pipx install "[gpu]" --force` (pipx reinstall resets the wheel).
+You can also set `provider = "cuda"` in `~/.config/engra/config.toml` under `[embedding]`.
+
 ---
 
 ### From source with pip (all platforms)
@@ -147,6 +168,7 @@ engra index report.pdf --no-store             # index without storing a copy
 engra index report.pdf --description "..."    # set a human-readable project description
 engra index report.pdf --no-autodescribe      # skip AI auto-description generation
 engra index --check                           # report stale or missing source files
+engra index ./docs/ --profile                 # show per-phase timing breakdown after indexing
 ```
 
 ## Searching
