@@ -375,11 +375,13 @@ def _data_index(
     description: str | None = None,
     auto_describe: bool = True,
     on_progress: Callable[[int, int, str], None] | None = None,
+    on_file_done: Callable[[str, str], None] | None = None,
 ) -> dict:
     """Index files. Returns {total_chunks, results: [{path, filename, status, ...}]}.
 
     Each result has status 'indexed' | 'skipped' | 'error'.
     on_progress(done, total, filename) is called after each chunk is embedded.
+    on_file_done(filename, status) is called once per file with its terminal status.
     Raises RuntimeError on KeyboardInterrupt (cleaned up, no partial data).
     """
     collection = get_collection()
@@ -398,6 +400,8 @@ def _data_index(
 
         if not file_path.exists():
             results.append({**entry, "status": "skipped", "reason": "not found"})
+            if on_file_done:
+                on_file_done(file_path.name, "skipped")
             continue
 
         if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
@@ -408,6 +412,8 @@ def _data_index(
                     "reason": f"unsupported type {file_path.suffix}",
                 }
             )
+            if on_file_done:
+                on_file_done(file_path.name, "skipped")
             continue
 
         proj = project or default_project(file_path)
@@ -422,6 +428,8 @@ def _data_index(
                     "reason": f"already indexed ({len(existing['ids'])} chunks)",
                 }
             )
+            if on_file_done:
+                on_file_done(file_path.name, "skipped")
             continue
 
         reindexed = False
@@ -438,6 +446,8 @@ def _data_index(
             sections = read_file(file_path)
         except Exception as exc:
             results.append({**entry, "status": "error", "reason": f"read error: {exc}"})
+            if on_file_done:
+                on_file_done(file_path.name, "error")
             continue
 
         total_sections = sections[0].total if sections else 0
@@ -522,6 +532,8 @@ def _data_index(
                 "store_action": store_action,
             }
         )
+        if on_file_done:
+            on_file_done(file_path.name, "indexed")
 
         # Accumulate sample chunks for auto-description
         samples = project_sample_chunks.setdefault(proj, [])
@@ -1193,7 +1205,8 @@ def cmd_index(
         )
         return
 
-    tasks: dict[str, int] = {}
+    n_total = len(expanded)
+    is_multi = n_total > 1
 
     with Progress(
         SpinnerColumn(),
@@ -1202,13 +1215,52 @@ def cmd_index(
         TaskProgressColumn(),
         console=console,
     ) as progress:
+        if is_multi:
+            # ── Directory mode: one overall file-count bar + one current-file chunk bar ──
+            files_done_count = [0]
+            overall_task = progress.add_task(
+                f"Files  [bold]0 / {n_total}[/bold]",
+                total=n_total,
+            )
+            current_task = progress.add_task("", total=None, visible=False)
+            current_file: list[str | None] = [None]
 
-        def on_progress(done: int, total: int, filename: str) -> None:
-            if filename not in tasks:
-                tasks[filename] = progress.add_task(
-                    f"Embedding [cyan]{filename}[/cyan]", total=total
+            def on_progress(done: int, total: int, filename: str) -> None:
+                if filename != current_file[0]:
+                    current_file[0] = filename
+                    progress.update(
+                        current_task,
+                        visible=True,
+                        description=f"  [dim]↳[/dim] [cyan]{filename}[/cyan]",
+                        completed=0,
+                        total=total,
+                    )
+                progress.update(current_task, completed=done)
+
+            def on_file_done(filename: str, status: str) -> None:
+                files_done_count[0] += 1
+                n = files_done_count[0]
+                progress.update(
+                    overall_task,
+                    completed=n,
+                    description=f"Files  [bold]{n} / {n_total}[/bold]",
                 )
-            progress.update(tasks[filename], completed=done, total=total)
+                if status != "indexed":
+                    progress.update(current_task, visible=False)
+                current_file[0] = None
+
+        else:
+            # ── Single-file mode: per-chunk bar (unchanged behaviour) ──────────────
+            single_tasks: dict[str, int] = {}
+
+            def on_progress(done: int, total: int, filename: str) -> None:
+                if filename not in single_tasks:
+                    single_tasks[filename] = progress.add_task(
+                        f"Embedding [cyan]{filename}[/cyan]", total=total
+                    )
+                progress.update(single_tasks[filename], completed=done, total=total)
+
+            on_file_done = None  # type: ignore[assignment]
 
         try:
             result = _data_index(
@@ -1220,39 +1272,75 @@ def cmd_index(
                 description=description,
                 auto_describe=auto_describe,
                 on_progress=on_progress,
+                on_file_done=on_file_done if is_multi else None,
             )
         except RuntimeError as exc:
             console.print(f"\n[red][interrupted][/red] {exc}")
             raise SystemExit(1)
 
-    for r in result["results"]:
-        if r["status"] == "skipped":
-            reason = r["reason"] or ""
-            if "already indexed" in reason:
-                console.print(f"[yellow][skip][/yellow] {reason}: {r['filename']}")
-                console.print("       Use [bold]--force[/bold] to re-index.")
-            elif reason == "not found":
-                console.print(f"[yellow][skip][/yellow] not found: {r['path']}")
-            else:
-                console.print(f"[yellow][skip][/yellow] {reason}: {r['filename']}")
-        elif r["status"] == "error":
-            console.print(f"[red][error][/red] Could not read {r['filename']}: {r['reason']}")
-        elif r["status"] == "indexed":
-            if r.get("reindexed"):
-                console.print(f"[dim][re-index] {r['filename']}[/dim]")
-            if r.get("store_action"):
-                console.print(f"[dim]File {r['store_action']}[/dim]")
-            skipped = r["total_sections"] - r["sections_indexed"]
-            skip_note = (
-                f", skipped {skipped} sections shorter than {MIN_CHARS} chars"
-                if skipped > 0
-                else ""
-            )
+    # ── Post-progress output ──────────────────────────────────────────────────
+
+    if is_multi:
+        # Aggregate by project; show one summary line per project
+        from collections import defaultdict
+
+        proj_stats: dict[str, dict] = defaultdict(lambda: {"indexed": 0, "chunks": 0})
+        error_results: list[dict] = []
+        n_skipped = 0
+
+        for r in result["results"]:
+            if r["status"] == "indexed":
+                proj_stats[r["project"]]["indexed"] += 1
+                proj_stats[r["project"]]["chunks"] += r["chunks_added"]
+            elif r["status"] == "skipped":
+                n_skipped += 1
+            elif r["status"] == "error":
+                error_results.append(r)
+
+        for proj, stats in sorted(proj_stats.items()):
             console.print(
-                f"  → [green]{r['chunks_added']} chunks[/green] from "
-                f"{r['sections_indexed']}/{r['total_sections']} sections{skip_note} "
-                f"→ project [cyan]{r['project']}[/cyan]"
+                f"  → [green]{stats['indexed']} file(s)[/green], "
+                f"[green]{stats['chunks']} chunks[/green] added "
+                f"→ project [cyan]{proj}[/cyan]"
             )
+        if n_skipped:
+            console.print(
+                f"  [yellow]{n_skipped} file(s) skipped[/yellow]"
+                f" (already indexed — use [bold]--force[/bold] to re-index)"
+            )
+        for r in error_results:
+            console.print(f"  [red][error][/red] {r['filename']}: {r['reason']}")
+
+    else:
+        # Single-file: keep the existing verbose per-result output
+        for r in result["results"]:
+            if r["status"] == "skipped":
+                reason = r["reason"] or ""
+                if "already indexed" in reason:
+                    console.print(f"[yellow][skip][/yellow] {reason}: {r['filename']}")
+                    console.print("       Use [bold]--force[/bold] to re-index.")
+                elif reason == "not found":
+                    console.print(f"[yellow][skip][/yellow] not found: {r['path']}")
+                else:
+                    console.print(f"[yellow][skip][/yellow] {reason}: {r['filename']}")
+            elif r["status"] == "error":
+                console.print(f"[red][error][/red] Could not read {r['filename']}: {r['reason']}")
+            elif r["status"] == "indexed":
+                if r.get("reindexed"):
+                    console.print(f"[dim][re-index] {r['filename']}[/dim]")
+                if r.get("store_action"):
+                    console.print(f"[dim]File {r['store_action']}[/dim]")
+                skipped_secs = r["total_sections"] - r["sections_indexed"]
+                skip_note = (
+                    f", skipped {skipped_secs} sections shorter than {MIN_CHARS} chars"
+                    if skipped_secs > 0
+                    else ""
+                )
+                console.print(
+                    f"  → [green]{r['chunks_added']} chunks[/green] from "
+                    f"{r['sections_indexed']}/{r['total_sections']} sections{skip_note} "
+                    f"→ project [cyan]{r['project']}[/cyan]"
+                )
 
     console.print(f"\nKnowledge base: [bold]{result['total_chunks']} chunks[/bold] total.")
 
