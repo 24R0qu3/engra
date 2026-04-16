@@ -4,6 +4,7 @@ import logging
 import re
 import sys
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import chromadb
@@ -42,7 +43,7 @@ console = Console()
 
 MODEL_NAME = "intfloat/multilingual-e5-large"
 MIN_CHARS = 80
-CHUNK_SIZE = 1500
+CHUNK_SIZE = 2000
 CHUNK_OVERLAP = 200
 DEFAULT_MIN_SCORE = 0.3  # MCP engra_search default; below this is treated as "not found"
 
@@ -240,9 +241,16 @@ def _model_is_cached() -> bool:
 
 
 def load_model():
+    import os
+
     from fastembed import (
         TextEmbedding,  # noqa: PLC0415 – lazy import avoids ORT load on non-embedding commands
     )
+
+    cfg = load_config().get("embedding", {})
+    threads_cfg: int = cfg.get("threads", 0)
+    threads = threads_cfg if threads_cfg > 0 else (os.cpu_count() or 1)
+    provider: str = cfg.get("provider", "cpu").lower()
 
     if _model_is_cached():
         console.print(f"[dim]Loading model '{MODEL_NAME}'...[/dim]")
@@ -251,7 +259,28 @@ def load_model():
             f"[bold]First run:[/bold] downloading model [cyan]{MODEL_NAME}[/cyan] "
             f"to [dim]{CACHE_DIR / 'models'}[/dim] (one-time, ~1 GB)…"
         )
-    return TextEmbedding(MODEL_NAME, cache_dir=str(CACHE_DIR / "models"))
+
+    kwargs: dict = {
+        "cache_dir": str(CACHE_DIR / "models"),
+        "threads": threads,
+    }
+    if provider != "cpu":
+        provider_map = {
+            "cuda": "CUDAExecutionProvider",
+            "rocm": "ROCMExecutionProvider",
+            "directml": "DmlExecutionProvider",
+        }
+        ort_provider = provider_map.get(provider, f"{provider}ExecutionProvider")
+        kwargs["providers"] = [ort_provider, "CPUExecutionProvider"]
+        try:
+            return TextEmbedding(MODEL_NAME, **kwargs)
+        except Exception as exc:
+            console.print(
+                f"[yellow]Warning:[/yellow] provider '{provider}' unavailable ({exc}), falling back to CPU"
+            )
+            del kwargs["providers"]
+
+    return TextEmbedding(MODEL_NAME, **kwargs)
 
 
 def doc_id_prefix(pdf_path: Path) -> str:
@@ -260,15 +289,45 @@ def doc_id_prefix(pdf_path: Path) -> str:
 
 
 def chunk_text(text: str) -> list[str]:
-    """Split text into overlapping fixed-size character windows."""
+    """Split text at paragraph/sentence boundaries up to CHUNK_SIZE chars with overlap."""
     if len(text) <= CHUNK_SIZE:
         return [text]
-    chunks = []
-    start = 0
-    while start < len(text):
-        chunks.append(text[start : start + CHUNK_SIZE])
-        start += CHUNK_SIZE - CHUNK_OVERLAP
-    return chunks
+    paragraphs = re.split(r"\n{2,}", text)
+    raw: list[str] = []
+    current = ""
+    for para in paragraphs:
+        if len(current) + len(para) + 2 <= CHUNK_SIZE:
+            current = (current + "\n\n" + para).lstrip()
+        else:
+            if current:
+                raw.append(current)
+            if len(para) <= CHUNK_SIZE:
+                current = para
+            else:
+                sentences = re.split(r"(?<=[.!?])\s+", para)
+                current = ""
+                for sent in sentences:
+                    if len(current) + len(sent) + 1 <= CHUNK_SIZE:
+                        current = (current + " " + sent).lstrip()
+                    else:
+                        if current:
+                            raw.append(current)
+                        while len(sent) > CHUNK_SIZE:
+                            sp = sent.rfind(" ", 0, CHUNK_SIZE)
+                            sp = sp if sp > 0 else CHUNK_SIZE
+                            raw.append(sent[:sp])
+                            sent = sent[sp:].lstrip()
+                        current = sent
+    if current:
+        raw.append(current)
+    if len(raw) <= 1:
+        return raw
+    # Apply overlap: prefix each chunk (after the first) with the tail of the previous chunk
+    result = [raw[0]]
+    for i in range(1, len(raw)):
+        tail = result[-1][-CHUNK_OVERLAP:]
+        result.append(tail + raw[i])
+    return result
 
 
 def default_project(file_path: Path) -> str:
@@ -366,6 +425,50 @@ def _warn_stale_from_metas(metas: list[dict]) -> None:
 # ── Data functions (pure retrieval, no console output) ────────────────────────
 
 
+def _prepare_chunks(
+    file_path: Path,
+    proj: str,
+    prefix: str,
+    indexed_at: str,
+    source_mtime: float | None,
+) -> tuple[int, list[str], list[dict]]:
+    """Read, parse, and chunk a single file. Returns (total_sections, chunk_texts, chunk_metas).
+
+    Designed to run in a background thread so IO and parsing overlap with ONNX inference.
+    """
+    sections = read_file(file_path)
+    total_sections = sections[0].total if sections else 0
+    chunk_texts: list[str] = []
+    chunk_metas: list[dict] = []
+    for section in sections:
+        if len(section.text) < MIN_CHARS:
+            continue
+        raw_chunks = [section.text] if section.atomic else chunk_text(section.text)
+        for chunk_idx, chunk in enumerate(raw_chunks):
+            doc_text = f"{section.breadcrumb}\n{chunk}" if section.breadcrumb else chunk
+            chunk_texts.append(doc_text)
+            chunk_metas.append(
+                {
+                    "source": str(file_path.resolve()),
+                    "filename": file_path.name,
+                    "page": section.phys_page,
+                    "page_label": section.page_label,
+                    "total_pages": section.total,
+                    "chunk": chunk_idx,
+                    "project": proj,
+                    "indexed_at": indexed_at,
+                    "source_mtime": source_mtime,
+                    "model": MODEL_NAME,
+                    "chunk_size": CHUNK_SIZE,
+                    "chunk_overlap": CHUNK_OVERLAP,
+                    "links_to": ",".join(section.links_to),
+                    "breadcrumb": section.breadcrumb,
+                    "cross_refs": ",".join(section.cross_refs),
+                }
+            )
+    return total_sections, chunk_texts, chunk_metas
+
+
 def _data_index(
     paths: list[Path],
     force: bool = False,
@@ -395,118 +498,44 @@ def _data_index(
     # Collect sample chunk texts per project for auto-description
     project_sample_chunks: dict[str, list[str]] = {}
 
-    for file_path in expanded:
-        entry: dict = {"path": str(file_path), "filename": file_path.name}
+    _pending: tuple | None = None  # (Future, file_path, entry, proj, reindexed, store_action)
 
-        if not file_path.exists():
-            results.append({**entry, "status": "skipped", "reason": "not found"})
-            if on_file_done:
-                on_file_done(file_path.name, "skipped")
-            continue
-
-        if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            results.append(
-                {
-                    **entry,
-                    "status": "skipped",
-                    "reason": f"unsupported type {file_path.suffix}",
-                }
-            )
-            if on_file_done:
-                on_file_done(file_path.name, "skipped")
-            continue
-
-        proj = project or default_project(file_path)
-        prefix = doc_id_prefix(file_path)
-        existing = collection.get(where={"source": str(file_path.resolve())})
-
-        if existing["ids"] and not force:
-            results.append(
-                {
-                    **entry,
-                    "status": "skipped",
-                    "reason": f"already indexed ({len(existing['ids'])} chunks)",
-                }
-            )
-            if on_file_done:
-                on_file_done(file_path.name, "skipped")
-            continue
-
-        reindexed = False
-        if existing["ids"]:
-            collection.delete(ids=existing["ids"])
-            reindexed = True
-
-        store_action: str | None = None
-        if store:
-            store_file(file_path, copy=copy)
-            store_action = "copied" if copy else "linked"
+    def _process_pending() -> None:
+        nonlocal _pending
+        if _pending is None:
+            return
+        fut, fp, entry, proj, reindexed, store_action = _pending
+        _pending = None
 
         try:
-            sections = read_file(file_path)
+            total_sections, chunk_texts, chunk_metas = fut.result()
         except Exception as exc:
             results.append({**entry, "status": "error", "reason": f"read error: {exc}"})
             if on_file_done:
-                on_file_done(file_path.name, "error")
-            continue
-
-        total_sections = sections[0].total if sections else 0
-        indexed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        try:
-            source_mtime: float | None = file_path.stat().st_mtime
-        except OSError:
-            source_mtime = None
-
-        chunk_texts: list[str] = []
-        chunk_metas: list[dict] = []
-        for section in sections:
-            if len(section.text) < MIN_CHARS:
-                continue
-            raw_chunks = [section.text] if section.atomic else chunk_text(section.text)
-            for chunk_idx, chunk in enumerate(raw_chunks):
-                doc_text = f"{section.breadcrumb}\n{chunk}" if section.breadcrumb else chunk
-                chunk_texts.append(doc_text)
-                chunk_metas.append(
-                    {
-                        "source": str(file_path.resolve()),
-                        "filename": file_path.name,
-                        "page": section.phys_page,
-                        "page_label": section.page_label,
-                        "total_pages": section.total,
-                        "chunk": chunk_idx,
-                        "project": proj,
-                        "indexed_at": indexed_at,
-                        "source_mtime": source_mtime,
-                        "model": MODEL_NAME,
-                        "chunk_size": CHUNK_SIZE,
-                        "chunk_overlap": CHUNK_OVERLAP,
-                        "links_to": ",".join(section.links_to),
-                        "breadcrumb": section.breadcrumb,
-                        "cross_refs": ",".join(section.cross_refs),
-                    }
-                )
+                on_file_done(fp.name, "error")
+            return
 
         ids: list[str] = []
         embeddings: list[list[float]] = []
         documents: list[str] = []
         metadatas: list[dict] = []
+        prefix = doc_id_prefix(fp)
 
         try:
-            embed_gen = model.embed(chunk_texts, batch_size=32)
-            for chunk, meta, embedding in zip(chunk_texts, chunk_metas, embed_gen):
+            embed_cfg = load_config().get("embedding", {})
+            embed_gen = model.embed(chunk_texts, batch_size=embed_cfg.get("batch_size", 64))
+            for doc_text, meta, embedding in zip(chunk_texts, chunk_metas, embed_gen):
                 ids.append(f"{prefix}_p{meta['page']}_c{meta['chunk']}")
                 embeddings.append(embedding.tolist())
-                documents.append(chunk)
+                documents.append(doc_text)
                 metadatas.append(meta)
                 if on_progress:
-                    on_progress(len(ids), len(chunk_texts), file_path.name)
+                    on_progress(len(ids), len(chunk_texts), fp.name)
         except KeyboardInterrupt:
-            partial = collection.get(where={"source": str(file_path.resolve())})
+            partial = collection.get(where={"source": str(fp.resolve())})
             if partial["ids"]:
                 collection.delete(ids=partial["ids"])
-            raise RuntimeError(
-                f"Interrupted while indexing {file_path.name}. No partial data left."
-            )
+            raise RuntimeError(f"Interrupted while indexing {fp.name}. No partial data left.")
 
         if ids:
             batch = 100
@@ -533,13 +562,74 @@ def _data_index(
             }
         )
         if on_file_done:
-            on_file_done(file_path.name, "indexed")
+            on_file_done(fp.name, "indexed")
 
-        # Accumulate sample chunks for auto-description
         samples = project_sample_chunks.setdefault(proj, [])
         need = AUTO_DESCRIBE_SAMPLE_CHUNKS - len(samples)
         if need > 0 and chunk_texts:
             samples.extend(chunk_texts[:need])
+
+    with ThreadPoolExecutor(max_workers=1) as _pool:
+        for file_path in expanded:
+            _process_pending()
+
+            entry: dict = {"path": str(file_path), "filename": file_path.name}
+
+            if not file_path.exists():
+                results.append({**entry, "status": "skipped", "reason": "not found"})
+                if on_file_done:
+                    on_file_done(file_path.name, "skipped")
+                continue
+
+            if file_path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+                results.append(
+                    {
+                        **entry,
+                        "status": "skipped",
+                        "reason": f"unsupported type {file_path.suffix}",
+                    }
+                )
+                if on_file_done:
+                    on_file_done(file_path.name, "skipped")
+                continue
+
+            proj = project or default_project(file_path)
+            prefix = doc_id_prefix(file_path)
+            existing = collection.get(where={"source": str(file_path.resolve())})
+
+            if existing["ids"] and not force:
+                results.append(
+                    {
+                        **entry,
+                        "status": "skipped",
+                        "reason": f"already indexed ({len(existing['ids'])} chunks)",
+                    }
+                )
+                if on_file_done:
+                    on_file_done(file_path.name, "skipped")
+                continue
+
+            reindexed = False
+            if existing["ids"]:
+                collection.delete(ids=existing["ids"])
+                reindexed = True
+
+            store_action: str | None = None
+            if store:
+                store_file(file_path, copy=copy)
+                store_action = "copied" if copy else "linked"
+
+            indexed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            try:
+                source_mtime: float | None = file_path.stat().st_mtime
+            except OSError:
+                source_mtime = None
+
+            # Submit read+parse+chunk to the background thread; embed runs next iteration
+            fut = _pool.submit(_prepare_chunks, file_path, proj, prefix, indexed_at, source_mtime)
+            _pending = (fut, file_path, entry, proj, reindexed, store_action)
+
+        _process_pending()  # flush the final file
 
     # ── Post-indexing: save user description and generate auto-description ──────
     indexed_projects = {r["project"] for r in results if r.get("status") == "indexed"}

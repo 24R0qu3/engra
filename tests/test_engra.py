@@ -54,24 +54,26 @@ def test_exact_chunk_size_single_chunk():
 
 
 def test_long_text_multiple_chunks():
-    text = "x" * (CHUNK_SIZE * 2)
+    # Use text > 2000 chars with paragraph breaks so actual splitting occurs
+    text = "word " * 500  # ~2500 chars
     chunks = chunk_text(text)
     assert len(chunks) > 1
 
 
 def test_chunks_have_overlap():
-    text = "ab" * CHUNK_SIZE  # long enough to split
+    # Use paragraph-separated text to ensure actual splitting
+    text = "\n\n".join(["sentence." * 100 for _ in range(5)])
     chunks = chunk_text(text)
     if len(chunks) > 1:
         # end of first chunk should appear at start of second
-        overlap = chunks[0][CHUNK_SIZE - CHUNK_OVERLAP :]
+        overlap = chunks[0][-CHUNK_OVERLAP:]
         assert chunks[1].startswith(overlap)
 
 
 def test_chunk_max_size():
-    text = "x" * (CHUNK_SIZE * 3)
+    text = "word " * 500  # 2500 chars > CHUNK_SIZE
     for chunk in chunk_text(text):
-        assert len(chunk) <= CHUNK_SIZE
+        assert len(chunk) <= CHUNK_SIZE + CHUNK_OVERLAP
 
 
 def test_empty_text():

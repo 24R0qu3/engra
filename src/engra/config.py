@@ -34,6 +34,11 @@ DEFAULTS: dict = {
         "api_key": "ollama",
         "claude_model": "claude-haiku-4-5-20251001",
     },
+    "embedding": {
+        "batch_size": 64,
+        "threads": 0,      # 0 = use os.cpu_count()
+        "provider": "cpu",
+    },
 }
 
 _DEFAULT_TOML = """\
@@ -58,6 +63,14 @@ api_base = "http://localhost:11434/v1"
 model = "llama3"
 api_key = "ollama"
 # claude_model = "claude-haiku-4-5-20251001"  # used when backend = "claude"
+
+[embedding]
+# batch_size: number of chunks per embedding batch (default 64)
+# threads: ONNX inference threads, 0 = auto (os.cpu_count())
+# provider: "cpu" | "cuda" | "rocm" | "directml"
+batch_size = 64
+threads = 0
+provider = "cpu"
 """
 
 
