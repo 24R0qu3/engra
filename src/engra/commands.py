@@ -663,6 +663,10 @@ def _data_index(
 
         _process_pending()  # flush the final file
 
+    # Free the embedding model to release GPU/CPU memory before the LLM autodescribe step
+    del model
+    import gc; gc.collect()
+
     # ── Post-indexing: save user description and generate auto-description ──────
     indexed_projects = {r["project"] for r in results if r.get("status") == "indexed"}
 

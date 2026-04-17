@@ -208,7 +208,9 @@ def read_html(path: Path) -> list[Section]:
 
     links = _extract_html_links(soup, source_name=path.name)
 
-    for tag in soup(["script", "style", "nav", "footer", "header"]):
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+        tag.decompose()
+    for tag in soup("ul", class_="ccore"):  # STW core-availability badges (sc/bc/ac)
         tag.decompose()
 
     heading_tags = {"h1", "h2", "h3", "h4"}
@@ -224,7 +226,16 @@ def read_html(path: Path) -> list[Section]:
     current_level = 0
     heading_stack: list[tuple[int, str]] = []  # (level, label)
 
-    root = soup.body or soup
+    # Prefer a semantic content container so deeply-nested Sphinx/Bootstrap layouts
+    # don't fall through to the descendants-based fallback with boilerplate noise.
+    body = soup.body or soup
+    root = (
+        body.find("main")
+        or body.find(attrs={"role": "main"})
+        or body.find("article")
+        or body.find("div", class_="rst-content")
+        or body
+    )
     for node in root.children:
         if isinstance(node, Tag) and node.name in heading_tags:
             # Flush accumulated section
