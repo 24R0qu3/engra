@@ -672,9 +672,7 @@ def test_mcp_list_members_dispatch(monkeypatch):
     monkeypatch.setattr(cmd, "read_session", lambda: [])
 
     ms = _import_mcp_server()
-    results = asyncio.run(
-        ms.server._call_tool_fn("engra_list_members", {"filename": "doc.pdf"})
-    )
+    results = asyncio.run(ms.server._call_tool_fn("engra_list_members", {"filename": "doc.pdf"}))
     data = json.loads(results[0].text)
     assert isinstance(data, list)
 

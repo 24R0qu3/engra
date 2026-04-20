@@ -1972,10 +1972,7 @@ def test_section_cross_refs_default_empty():
 def test_read_html_breadcrumb_h2_under_h1(tmp_path):
     f = tmp_path / "doc.html"
     f.write_text(
-        "<html><body>"
-        "<h1>Animals</h1><p>intro</p>"
-        "<h2>Dogs</h2><p>dog content</p>"
-        "</body></html>"
+        "<html><body><h1>Animals</h1><p>intro</p><h2>Dogs</h2><p>dog content</p></body></html>"
     )
     sections = read_html(f)
     # Find the Dogs section
@@ -1999,12 +1996,7 @@ def test_read_html_breadcrumb_h3_depth(tmp_path):
 
 def test_read_html_breadcrumb_resets_on_same_level(tmp_path):
     f = tmp_path / "doc.html"
-    f.write_text(
-        "<html><body>"
-        "<h2>Section A</h2><p>a</p>"
-        "<h2>Section B</h2><p>b</p>"
-        "</body></html>"
-    )
+    f.write_text("<html><body><h2>Section A</h2><p>a</p><h2>Section B</h2><p>b</p></body></html>")
     sections = read_html(f)
     b = next(s for s in sections if s.page_label == "Section B")
     assert b.breadcrumb == ""
@@ -2012,9 +2004,7 @@ def test_read_html_breadcrumb_resets_on_same_level(tmp_path):
 
 def test_read_html_root_section_has_empty_breadcrumb(tmp_path):
     f = tmp_path / "doc.html"
-    f.write_text(
-        "<html><body><p>preamble</p><h2>First</h2><p>content</p></body></html>"
-    )
+    f.write_text("<html><body><p>preamble</p><h2>First</h2><p>content</p></body></html>")
     sections = read_html(f)
     # The first section (preamble, before any heading) has no breadcrumb
     assert sections[0].breadcrumb == ""
@@ -2081,9 +2071,7 @@ def test_read_html_cross_refs_not_in_text(tmp_path):
 
 def test_read_html_h4_section_is_atomic(tmp_path):
     f = tmp_path / "doc.html"
-    f.write_text(
-        "<html><body><h4>myMethod</h4><p>description</p></body></html>"
-    )
+    f.write_text("<html><body><h4>myMethod</h4><p>description</p></body></html>")
     sections = read_html(f)
     method_section = next(s for s in sections if s.page_label == "myMethod")
     assert method_section.atomic is True
@@ -2091,9 +2079,7 @@ def test_read_html_h4_section_is_atomic(tmp_path):
 
 def test_read_html_h2_section_not_atomic_by_default(tmp_path):
     f = tmp_path / "doc.html"
-    f.write_text(
-        "<html><body><h2>Overview</h2><p>general text</p></body></html>"
-    )
+    f.write_text("<html><body><h2>Overview</h2><p>general text</p></body></html>")
     sections = read_html(f)
     overview = next(s for s in sections if s.page_label == "Overview")
     assert overview.atomic is False
@@ -2123,9 +2109,7 @@ def test_data_index_atomic_section_not_split(tmp_path, monkeypatch):
     from engra.readers import Section
 
     long_text = "x" * (CHUNK_SIZE * 3)
-    atomic_section = Section(
-        text=long_text, phys_page=1, page_label="Big", total=1, atomic=True
-    )
+    atomic_section = Section(text=long_text, phys_page=1, page_label="Big", total=1, atomic=True)
     monkeypatch.setattr(cmd, "read_file", lambda path: [atomic_section])
     monkeypatch.setattr(cmd, "store_file", lambda path, copy=True: path)
 
@@ -2151,16 +2135,15 @@ def test_data_index_atomic_section_not_split(tmp_path, monkeypatch):
 
 def test_data_index_nonatomic_long_section_is_split(tmp_path, monkeypatch):
     """A non-atomic section longer than CHUNK_SIZE should produce multiple chunks."""
-    import numpy as np
     from unittest.mock import MagicMock
+
+    import numpy as np
 
     import engra.commands as cmd
     from engra.readers import Section
 
     long_text = "y " * (CHUNK_SIZE + 100)
-    section = Section(
-        text=long_text, phys_page=1, page_label="Long", total=1, atomic=False
-    )
+    section = Section(text=long_text, phys_page=1, page_label="Long", total=1, atomic=False)
     monkeypatch.setattr(cmd, "read_file", lambda path: [section])
     monkeypatch.setattr(cmd, "store_file", lambda path, copy=True: path)
 
@@ -2187,7 +2170,6 @@ def test_data_index_nonatomic_long_section_is_split(tmp_path, monkeypatch):
 
 def _make_meta_with_new_fields(**overrides):
     """Build a metadata dict that includes the new breadcrumb/cross_refs fields."""
-    from unittest.mock import MagicMock
 
     base = {
         "source": "/tmp/doc.html",
@@ -2276,7 +2258,11 @@ def _make_list_members_col(metas, docs=None):
     docs = docs or ["text"] * len(metas)
     col = MagicMock()
     col.count.return_value = len(metas)
-    col.get.return_value = {"metadatas": metas, "documents": docs, "ids": [f"id{i}" for i in range(len(metas))]}
+    col.get.return_value = {
+        "metadatas": metas,
+        "documents": docs,
+        "ids": [f"id{i}" for i in range(len(metas))],
+    }
     return col
 
 
@@ -2331,8 +2317,20 @@ def test_data_list_members_section_filter_substring(monkeypatch):
     import engra.commands as cmd
 
     metas = [
-        {"page": 1, "page_label": "Dogs overview", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
-        {"page": 2, "page_label": "Cats overview", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
+        {
+            "page": 1,
+            "page_label": "Dogs overview",
+            "chunk": 0,
+            "filename": "doc.html",
+            "breadcrumb": "",
+        },
+        {
+            "page": 2,
+            "page_label": "Cats overview",
+            "chunk": 0,
+            "filename": "doc.html",
+            "breadcrumb": "",
+        },
     ]
     col = _make_list_members_col(metas)
     monkeypatch.setattr(cmd, "get_collection", lambda: col)
@@ -2347,7 +2345,13 @@ def test_data_list_members_section_filter_case_insensitive(monkeypatch):
     import engra.commands as cmd
 
     metas = [
-        {"page": 1, "page_label": "Dogs overview", "chunk": 0, "filename": "doc.html", "breadcrumb": ""},
+        {
+            "page": 1,
+            "page_label": "Dogs overview",
+            "chunk": 0,
+            "filename": "doc.html",
+            "breadcrumb": "",
+        },
     ]
     col = _make_list_members_col(metas)
     monkeypatch.setattr(cmd, "get_collection", lambda: col)
@@ -2361,7 +2365,13 @@ def test_data_list_members_returns_breadcrumb_in_chunks(monkeypatch):
     import engra.commands as cmd
 
     metas = [
-        {"page": 1, "page_label": "Foo", "chunk": 0, "filename": "doc.html", "breadcrumb": "NS > Class"},
+        {
+            "page": 1,
+            "page_label": "Foo",
+            "chunk": 0,
+            "filename": "doc.html",
+            "breadcrumb": "NS > Class",
+        },
     ]
     col = _make_list_members_col(metas, ["content"])
     monkeypatch.setattr(cmd, "get_collection", lambda: col)

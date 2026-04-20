@@ -36,7 +36,7 @@ DEFAULTS: dict = {
     },
     "embedding": {
         "batch_size": 64,
-        "threads": 0,      # 0 = use os.cpu_count()
+        "threads": 0,  # 0 = use os.cpu_count()
         "provider": "cpu",
     },
 }

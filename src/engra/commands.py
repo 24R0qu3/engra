@@ -1,4 +1,5 @@
 import datetime
+import gc
 import hashlib
 import logging
 import re
@@ -276,11 +277,13 @@ def load_model():
         kwargs["providers"] = [ort_provider, "CPUExecutionProvider"]
         try:
             return TextEmbedding(MODEL_NAME, **kwargs)
-        except Exception as exc:
+        except Exception:
             import sys
+
             venv_python = sys.executable
             console.print(
-                f"[yellow]Warning:[/yellow] provider '{provider}' unavailable, falling back to CPU.\n"
+                f"[yellow]Warning:[/yellow] provider '{provider}' unavailable,"
+                f" falling back to CPU.\n"
                 f"  To fix, run:\n"
                 f"  [bold]{venv_python} -m pip install onnxruntime-gpu "
                 f"--extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/[/bold]"
@@ -517,11 +520,11 @@ def _data_index(
     t_chroma_query: float = time.perf_counter() - _t_pre
 
     # Phase timers (seconds — t_chroma_query initialised above with upfront query cost)
-    t_embed: float = 0.0          # model.embed (ONNX inference)
-    t_chroma_write: float = 0.0   # collection.add (storing vectors)
+    t_embed: float = 0.0  # model.embed (ONNX inference)
+    t_chroma_write: float = 0.0  # collection.add (storing vectors)
     # Note: read+parse+chunk runs in background and overlaps with embed, so we
     # measure it as the wall time the future takes beyond the embed phase.
-    t_read_parse: float = 0.0     # fut.result() wait time (background read+chunk)
+    t_read_parse: float = 0.0  # fut.result() wait time (background read+chunk)
 
     _pending: tuple | None = None  # (Future, file_path, entry, proj, reindexed, store_action)
 
@@ -664,8 +667,8 @@ def _data_index(
         _process_pending()  # flush the final file
 
     # Free the embedding model to release GPU/CPU memory before the LLM autodescribe step
-    del model
-    import gc; gc.collect()
+    model = None
+    gc.collect()
 
     # ── Post-indexing: save user description and generate auto-description ──────
     indexed_projects = {r["project"] for r in results if r.get("status") == "indexed"}
@@ -1479,7 +1482,9 @@ def cmd_index(
                 )
 
     elapsed = time.monotonic() - t0
-    elapsed_str = f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed) // 60}m {int(elapsed) % 60}s"
+    elapsed_str = (
+        f"{elapsed:.1f}s" if elapsed < 60 else f"{int(elapsed) // 60}m {int(elapsed) % 60}s"
+    )
     console.print(
         f"\nKnowledge base: [bold]{result['total_chunks']} chunks[/bold] total"
         f"  [dim]({elapsed_str})[/dim]"
@@ -2379,9 +2384,7 @@ def cmd_import_soft(source_dir: Path, project: str | None = None) -> None:
     cmd_index([source_dir], copy=False, store=True, project=effective_project)
 
 
-_ORT_GPU_INDEX = (
-    "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
-)
+_ORT_GPU_INDEX = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/"
 
 
 def cmd_setup_gpu() -> None:
@@ -2397,6 +2400,7 @@ def cmd_setup_gpu() -> None:
 
     try:
         import onnxruntime as ort
+
         if "CUDAExecutionProvider" in ort.get_available_providers():
             console.print("[green]CUDA already available[/green] — nothing to do.")
             return
@@ -2407,11 +2411,14 @@ def cmd_setup_gpu() -> None:
     result = subprocess.run(
         [
             sys.executable,
-            "-m", "pip", "install",
+            "-m",
+            "pip",
+            "install",
             "onnxruntime-gpu",
             "--no-deps",
             "--force-reinstall",
-            "--extra-index-url", _ORT_GPU_INDEX,
+            "--extra-index-url",
+            _ORT_GPU_INDEX,
         ],
         check=False,
     )
@@ -2421,7 +2428,9 @@ def cmd_setup_gpu() -> None:
 
     # Verify
     import importlib
+
     import onnxruntime as ort  # noqa: PLC0415
+
     importlib.reload(ort)
     providers = ort.get_available_providers()
     if "CUDAExecutionProvider" in providers:

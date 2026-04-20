@@ -147,9 +147,7 @@ def _extract_html_links(soup, source_name: str | None = None) -> list[str]:
     return sorted(seen)
 
 
-def _process_section_nodes(
-    nodes: list, heading_level: int
-) -> tuple[str, list[str], bool]:
+def _process_section_nodes(nodes: list, heading_level: int) -> tuple[str, list[str], bool]:
     """Extract text, cross-references, and atomic status from a list of BeautifulSoup nodes.
 
     Returns (text, cross_refs, is_atomic).
@@ -184,7 +182,12 @@ def _process_section_nodes(
             # Check both the node itself and any nested matches
             is_fieldtable = node.name == "table" and "fieldtable" in node_classes
             is_enum_dl = node.name == "dl" and "enum" in node_classes
-            if is_fieldtable or is_enum_dl or node.find("table", class_="fieldtable") or node.find("dl", class_="enum"):
+            if (
+                is_fieldtable
+                or is_enum_dl
+                or node.find("table", class_="fieldtable")
+                or node.find("dl", class_="enum")
+            ):
                 is_atomic = True
             # Flatten remaining text
             for child in node.descendants:
@@ -245,7 +248,7 @@ def read_html(path: Path) -> list[Section]:
                 parts.append((text, current_label, bc, atomic, xrefs))
             # Update heading stack: pop levels >= current heading level
             level = heading_level_map[node.name]
-            heading_stack = [(l, lbl) for l, lbl in heading_stack if l < level]
+            heading_stack = [(lvl, lbl) for lvl, lbl in heading_stack if lvl < level]
             new_label = node.get_text(" ", strip=True)[:60] or current_label
             heading_stack.append((level, new_label))
             current_label, current_level, current_nodes = new_label, level, []

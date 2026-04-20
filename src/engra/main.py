@@ -23,7 +23,6 @@ from engra.commands import (  # noqa: E402
     cmd_info,
     cmd_list,
     cmd_mcp,
-    cmd_setup_gpu,
     cmd_project_activate,
     cmd_project_active,
     cmd_project_autodescribe,
@@ -34,6 +33,7 @@ from engra.commands import (  # noqa: E402
     cmd_project_rename,
     cmd_remove,
     cmd_search,
+    cmd_setup_gpu,
     parse_page_range,
 )
 from engra.config import init as init_config  # noqa: E402
@@ -211,7 +211,8 @@ def run() -> None:
     # setup-gpu
     sub.add_parser(
         "setup-gpu",
-        help="Install the correct onnxruntime-gpu wheel for CUDA 12 (run after pipx install '[gpu]' --force)",
+        help="Install the correct onnxruntime-gpu wheel for CUDA 12"
+        " (run after pipx install '[gpu]' --force)",
     )
 
     # mcp
