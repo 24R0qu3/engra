@@ -576,8 +576,10 @@ def test_mcp_call_tool_search_round_trips(monkeypatch):
     results = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "test"}))
     assert len(results) == 1
     data = json.loads(results[0].text)
-    # Should be a list of result dicts (possibly empty if score filter cuts them)
-    assert isinstance(data, list)
+    # engra_search now returns a {results, not_found} envelope, not a bare list.
+    assert isinstance(data, dict)
+    assert isinstance(data["results"], list)
+    assert "not_found" in data
 
 
 def test_mcp_call_tool_unknown_returns_error():
@@ -698,6 +700,79 @@ def test_mcp_search_explicit_min_score_overrides(monkeypatch):
     ms = _import_mcp_server()
     asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "test", "min_score": 0.0}))
     assert captured["min_score"] == 0.0
+
+
+# ── engra_search not_found envelope ──────────────────────────────────────────
+
+
+def test_mcp_search_envelope_found(monkeypatch):
+    """Confident results are wrapped in {results, not_found: False}."""
+    import asyncio
+
+    import engra.commands as cmd
+
+    def fake_search(**kwargs):
+        return [{"text": "a", "score": 0.9, "confidence": 1.0}]
+
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    data = json.loads(result[0].text)
+    assert data["not_found"] is False
+    assert len(data["results"]) == 1
+    assert "reason" not in data
+
+
+def test_mcp_search_envelope_empty_is_not_found(monkeypatch):
+    """An empty result set surfaces not_found with a reason."""
+    import asyncio
+
+    import engra.commands as cmd
+
+    monkeypatch.setattr(cmd, "_data_search", lambda **kwargs: [])
+
+    ms = _import_mcp_server()
+    result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    data = json.loads(result[0].text)
+    assert data["not_found"] is True
+    assert data["results"] == []
+    assert isinstance(data["reason"], str) and data["reason"]
+
+
+def test_mcp_search_envelope_low_confidence_is_not_found(monkeypatch):
+    """Results whose best confidence is below DEFAULT_MIN_SCORE are not_found."""
+    import asyncio
+
+    import engra.commands as cmd
+    from engra.commands import DEFAULT_MIN_SCORE
+
+    low = round(DEFAULT_MIN_SCORE - 0.05, 4)
+
+    def fake_search(**kwargs):
+        return [
+            {"text": "a", "score": 0.4, "confidence": low},
+            {"text": "b", "score": 0.3, "confidence": 0.0},
+        ]
+
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    data = json.loads(result[0].text)
+    assert data["not_found"] is True
+    assert len(data["results"]) == 2  # still returned, just flagged
+    assert "confidence" in data["reason"]
+
+
+def test_mcp_search_schema_mentions_not_found():
+    """The tool description advertises the not_found envelope."""
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    search_tool = next(t for t in tools if t.name == "engra_search")
+    assert "not_found" in search_tool.description
 
 
 # ── engra_list_members dispatch (Feature 4) ──────────────────────────────────
