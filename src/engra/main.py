@@ -150,6 +150,13 @@ def run() -> None:
         metavar="N",
         help="Retrieve a specific chunk index (default: all chunks on the page)",
     )
+    p_get.add_argument(
+        "--doc-id",
+        dest="doc_id",
+        default=None,
+        metavar="DOC_ID",
+        help="Select a specific document when the filename exists in multiple projects",
+    )
     nav_group = p_get.add_mutually_exclusive_group()
     nav_group.add_argument(
         "--next",
@@ -227,6 +234,13 @@ def run() -> None:
     # remove
     p_remove = sub.add_parser("remove", help="Remove a document from the index")
     p_remove.add_argument("pdf", type=Path)
+    p_remove.add_argument(
+        "--doc-id",
+        dest="doc_id",
+        default=None,
+        metavar="DOC_ID",
+        help="Select a specific document when the filename exists in multiple projects",
+    )
 
     # bookmark
     p_bm = sub.add_parser("bookmark", help="Manage saved searches")
@@ -371,6 +385,7 @@ def run() -> None:
             chunk=args.chunk,
             next_k=args.next,
             prev_k=args.prev,
+            doc_id=args.doc_id,
         )
     elif args.cmd == "ask":
         cmd_ask(
@@ -398,7 +413,7 @@ def run() -> None:
         else:
             cmd_mcp()
     elif args.cmd == "remove":
-        cmd_remove(args.pdf)
+        cmd_remove(args.pdf, doc_id=args.doc_id)
     elif args.cmd == "bookmark":
         if args.bm_cmd == "save":
             cmd_bookmark_save(

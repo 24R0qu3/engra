@@ -21,10 +21,24 @@ def ensure_dirs() -> None:
     DB_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def store_file(pdf_path: Path, copy: bool = True) -> Path:
-    """Copy or symlink a PDF into the engra files directory. Returns stored path."""
+def stored_name(doc_id: str, suffix: str) -> str:
+    """Return the on-disk filename for a document, scoped by its unique doc_id.
+
+    Two files that share a basename in different projects resolve to different
+    doc_ids, so their stored copies never collide.
+    """
+    return f"{doc_id}{suffix}"
+
+
+def store_file(pdf_path: Path, doc_id: str, copy: bool = True) -> Path:
+    """Copy or symlink a file into the engra files directory. Returns stored path.
+
+    The destination is scoped by *doc_id* (unique per resolved source path) so
+    two files that share a basename in different projects never overwrite each
+    other on disk.
+    """
     ensure_dirs()
-    dest = FILES_DIR / pdf_path.name
+    dest = FILES_DIR / stored_name(doc_id, pdf_path.suffix)
     if dest.exists() or dest.is_symlink():
         dest.unlink()
     if copy:
@@ -34,9 +48,9 @@ def store_file(pdf_path: Path, copy: bool = True) -> Path:
     return dest
 
 
-def remove_file(filename: str) -> None:
-    """Remove the stored copy or symlink for a file."""
-    dest = FILES_DIR / filename
+def remove_file(doc_id: str, suffix: str) -> None:
+    """Remove the stored copy or symlink for a document (doc_id-scoped name)."""
+    dest = FILES_DIR / stored_name(doc_id, suffix)
     if dest.exists() or dest.is_symlink():
         dest.unlink()
 

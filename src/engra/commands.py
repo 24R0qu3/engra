@@ -37,6 +37,7 @@ from engra.storage import (
     remove_project_meta,
     rename_project_meta,
     store_file,
+    stored_name,
     update_project_meta,
     write_session,
 )
@@ -378,6 +379,71 @@ def _build_where(
     return {"$and": clauses}
 
 
+# ── Document identity / disambiguation ────────────────────────────────────────
+
+
+class AmbiguousFilenameError(ValueError):
+    """Raised when a bare filename matches chunks from multiple distinct documents.
+
+    Two files sharing a basename in different projects resolve to different
+    doc_ids; when a lookup is scoped only by filename this collision would
+    otherwise silently merge their chunks. Callers should disambiguate by
+    passing an explicit ``doc_id`` (see the ``candidates`` attribute).
+    """
+
+    def __init__(self, filename: str, candidates: list[dict]):
+        self.filename = filename
+        self.candidates = candidates  # [{"doc_id": ..., "source": ...}, ...]
+        listing = "\n".join(
+            f"  {c['doc_id']}  ({c['source']})" for c in candidates
+        )
+        super().__init__(
+            f"Filename {filename!r} matches {len(candidates)} distinct documents. "
+            f"Disambiguate by passing a doc_id:\n{listing}"
+        )
+
+
+def _resolve_doc_scope(col, filename: str, doc_id: str | None) -> dict:
+    """Return a chromadb where-clause scoping a lookup to a single document.
+
+    When *doc_id* is given it is authoritative (filename becomes a convenience).
+    Otherwise the filename is checked for collisions: if it maps to more than one
+    distinct doc_id, ``AmbiguousFilenameError`` is raised. Chunks lacking a
+    doc_id (indexed before this feature) are treated as a single shared bucket so
+    legacy indexes never falsely report ambiguity.
+    """
+    if doc_id is not None:
+        return {"doc_id": doc_id}
+
+    metas = col.get(where={"filename": filename}, include=["metadatas"]).get("metadatas") or []
+    distinct = {m.get("doc_id", "") for m in metas}
+    distinct.discard("")  # missing doc_id → shared "unknown" bucket, not N documents
+    if len(distinct) > 1:
+        candidates: list[dict] = []
+        seen: set[str] = set()
+        for m in metas:
+            did = m.get("doc_id", "")
+            if did and did not in seen:
+                seen.add(did)
+                candidates.append({"doc_id": did, "source": m.get("source", "")})
+        raise AmbiguousFilenameError(filename, candidates)
+    return {"filename": filename}
+
+
+def _remove_stored_file(doc_id: str, source: str, filename: str) -> None:
+    """Remove a document's stored copy, handling legacy (pre-doc_id) names.
+
+    New documents are stored as ``{doc_id}{suffix}``; entries indexed before the
+    doc_id feature fall back to the bare basename they were stored under.
+    """
+    if doc_id:
+        remove_file(doc_id, Path(source).suffix if source else "")
+    elif filename:
+        legacy = FILES_DIR / filename
+        if legacy.exists() or legacy.is_symlink():
+            legacy.unlink()
+
+
 # ── Staleness helpers ─────────────────────────────────────────────────────────
 
 
@@ -461,6 +527,7 @@ def _prepare_chunks(
                 {
                     "source": str(file_path.resolve()),
                     "filename": file_path.name,
+                    "doc_id": prefix,
                     "page": section.phys_page,
                     "page_label": section.page_label,
                     "total_pages": section.total,
@@ -651,7 +718,7 @@ def _data_index(
 
             store_action: str | None = None
             if store:
-                store_file(file_path, copy=copy)
+                store_file(file_path, prefix, copy=copy)
                 store_action = "copied" if copy else "linked"
 
             indexed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -828,6 +895,7 @@ def _data_search(
         output.append(
             {
                 "filename": meta["filename"],
+                "doc_id": meta.get("doc_id", ""),
                 "page": meta["page"],
                 "page_label": meta.get("page_label", str(meta["page"])),
                 "total_pages": meta.get("total_pages", 0),
@@ -860,13 +928,19 @@ def _data_get_chunks(
     page_start: int,
     page_end: int,
     chunk: int | None = None,
+    doc_id: str | None = None,
 ) -> list[dict]:
-    """Retrieve full chunk text for a page range. Returns list of chunk dicts."""
+    """Retrieve full chunk text for a page range. Returns list of chunk dicts.
+
+    When *doc_id* is given it authoritatively selects one document; otherwise the
+    filename must map to a single document or ``AmbiguousFilenameError`` is raised.
+    """
     col = get_collection()
+    scope = _resolve_doc_scope(col, filename, doc_id)
     all_pairs: list[tuple[dict, str]] = []
 
     for page in range(page_start, page_end + 1):
-        clauses: list[dict] = [{"filename": filename}, {"page": page}]
+        clauses: list[dict] = [scope, {"page": page}]
         if chunk is not None:
             clauses.append({"chunk": chunk})
         r = col.get(where={"$and": clauses}, include=["documents", "metadatas"])
@@ -880,7 +954,7 @@ def _data_get_chunks(
 
     return [
         {
-            "filename": filename,
+            "filename": meta.get("filename", filename),
             "page": meta.get("page", page_start),
             "page_label": meta.get("page_label", str(meta.get("page", page_start))),
             "chunk_idx": meta.get("chunk", 0),
@@ -898,17 +972,21 @@ def _data_get_neighbors(
     chunk: int,
     direction: str = "next",
     count: int = 1,
+    doc_id: str | None = None,
 ) -> list[dict]:
     """Retrieve adjacent chunks. direction is 'next', 'prev', or 'both'.
 
     'both' returns prev chunks first, then next chunks.
     Returns [] if the anchor (page, chunk) is not found or already at boundary.
+    When *doc_id* is given it authoritatively selects one document; otherwise the
+    filename must map to a single document or ``AmbiguousFilenameError`` is raised.
     """
     if direction not in ("next", "prev", "both"):
         raise ValueError(f"direction must be 'next', 'prev', or 'both', got {direction!r}")
 
     col = get_collection()
-    sequence = _get_chunk_sequence(col, filename)
+    scope = _resolve_doc_scope(col, filename, doc_id)
+    sequence = _get_chunk_sequence(col, filename, doc_id=doc_id)
     ref_idx = _find_seq_index(sequence, page, chunk)
     if ref_idx is None:
         return []
@@ -926,13 +1004,13 @@ def _data_get_neighbors(
     for seq_idx in targets:
         tp, tc, _ = sequence[seq_idx]
         r = col.get(
-            where={"$and": [{"filename": filename}, {"page": tp}, {"chunk": tc}]},
+            where={"$and": [scope, {"page": tp}, {"chunk": tc}]},
             include=["documents", "metadatas"],
         )
         for meta, text in zip(r.get("metadatas") or [], r.get("documents") or []):
             result.append(
                 {
-                    "filename": filename,
+                    "filename": meta.get("filename", filename),
                     "page": meta.get("page", tp),
                     "page_label": meta.get("page_label", str(tp)),
                     "chunk_idx": meta.get("chunk", tc),
@@ -1108,12 +1186,15 @@ def _data_list_members(
     filename: str,
     projects: list[str] | None = None,
     section_filter: str | None = None,
+    doc_id: str | None = None,
 ) -> list[dict]:
     """Return all indexed sections for a file, grouped by section heading (page_label).
 
     Useful for structured browsing or absence-checking without a similarity query.
     projects=None uses the active session; [] searches globally.
     section_filter: case-insensitive substring match on section label.
+    When *doc_id* is given it authoritatively selects one document; otherwise the
+    filename must map to a single document or ``AmbiguousFilenameError`` is raised.
 
     Returns list of {section, page, chunks: [{chunk_idx, text, breadcrumb}]}.
     """
@@ -1124,9 +1205,9 @@ def _data_list_members(
         return []
 
     active_projects = projects if projects is not None else read_session()
-    where = _build_where(active_projects, filename)
-    if where is None:
-        where = {"filename": filename}
+    scope = _resolve_doc_scope(col, filename, doc_id)
+    proj_where = _build_where(active_projects, None)
+    where = scope if proj_where is None else {"$and": [proj_where, scope]}
 
     result = col.get(where=where, include=["documents", "metadatas"])
     docs: list[str] = result.get("documents") or []
@@ -1184,14 +1265,19 @@ def _data_export(project: str) -> dict:
         for i, e, d, m in zip(ids, embeddings, documents, metadatas)
     ]
 
-    # Collect stored file paths (may be symlinks)
+    # Collect stored file paths (may be symlinks), one per distinct document.
+    # New files are stored as {doc_id}{suffix}; legacy entries use the basename.
     seen_files: set[str] = set()
     file_paths: list[Path] = []
     for m in metadatas:
-        fname = m.get("filename", "")
-        if fname and fname not in seen_files:
-            seen_files.add(fname)
-            candidate = FILES_DIR / fname
+        did = m.get("doc_id", "")
+        if did:
+            name = stored_name(did, Path(m.get("source", "")).suffix)
+        else:
+            name = m.get("filename", "")
+        if name and name not in seen_files:
+            seen_files.add(name)
+            candidate = FILES_DIR / name
             if candidate.exists():
                 file_paths.append(candidate)
 
@@ -1839,9 +1925,15 @@ def _format_missing_pages(pages: list[int]) -> str:
     return ", ".join(groups)
 
 
-def _get_chunk_sequence(col, filename: str) -> list[tuple[int, int, str]]:
-    """Return sorted (page, chunk_idx, page_label) tuples for every chunk of a file."""
-    results = col.get(where={"filename": filename}, include=["metadatas"])
+def _get_chunk_sequence(
+    col, filename: str, doc_id: str | None = None
+) -> list[tuple[int, int, str]]:
+    """Return sorted (page, chunk_idx, page_label) tuples for every chunk of a file.
+
+    Scopes by *doc_id* when given so same-basename documents don't interleave.
+    """
+    where = {"doc_id": doc_id} if doc_id else {"filename": filename}
+    results = col.get(where=where, include=["metadatas"])
     metas: list[dict] = results.get("metadatas") or []
     seen: set[tuple[int, int]] = set()
     items: list[tuple[int, int, str]] = []
@@ -1899,18 +1991,27 @@ def cmd_get(
     chunk: int | None = None,
     next_k: int | None = None,
     prev_k: int | None = None,
+    doc_id: str | None = None,
 ) -> None:
     """Retrieve full chunk text from the index by filename and page range."""
     col = get_collection()
 
+    # Fail fast if the bare filename is ambiguous (same basename in >1 project)
+    try:
+        scope = _resolve_doc_scope(col, filename, doc_id)
+    except AmbiguousFilenameError as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        console.print("[dim]Re-run with --doc-id <id> to select one.[/dim]")
+        return
+
     # Stale/missing check for this file
     file_metas_list: list[dict] = (
-        col.get(where={"filename": filename}, include=["metadatas"]).get("metadatas") or []
+        col.get(where=scope, include=["metadatas"]).get("metadatas") or []
     )
     if file_metas_list:
         _warn_stale_from_metas([file_metas_list[0]])
 
-    sequence = _get_chunk_sequence(col, filename)
+    sequence = _get_chunk_sequence(col, filename, doc_id=doc_id)
     single_page = page_start == page_end
     nav_mode = next_k is not None or prev_k is not None
 
@@ -1934,7 +2035,7 @@ def cmd_get(
         direction = "next" if next_k is not None else "prev"
         count = next_k if next_k is not None else (prev_k or 1)
         chunks = _data_get_neighbors(
-            filename, ref_page, ref_chunk, direction=direction, count=count
+            filename, ref_page, ref_chunk, direction=direction, count=count, doc_id=doc_id
         )
 
         if not chunks:
@@ -1961,7 +2062,7 @@ def cmd_get(
         return
 
     # Normal mode
-    chunks = _data_get_chunks(filename, page_start, page_end, chunk=chunk)
+    chunks = _data_get_chunks(filename, page_start, page_end, chunk=chunk, doc_id=doc_id)
 
     if not chunks:
         if single_page:
@@ -2089,33 +2190,52 @@ def cmd_list() -> None:
     console.print(f"Total chunks in index: [bold]{sum(f['chunks'] for f in file_list)}[/bold]")
 
 
-def cmd_remove(pdf_path: Path) -> None:
+def cmd_remove(pdf_path: Path, doc_id: str | None = None) -> None:
     collection = get_collection()
-    source = str(pdf_path.resolve())
-    existing = collection.get(where={"source": source})
 
-    if not existing["ids"]:
-        all_meta = collection.get(include=["metadatas"])["metadatas"]
-        matches = {m["source"] for m in all_meta if m["filename"] == pdf_path.name}
-        if not matches:
-            console.print(f"[yellow]Not found in index:[/yellow] {pdf_path.name}")
+    if doc_id is not None:
+        existing = collection.get(where={"doc_id": doc_id})
+        if not existing["ids"]:
+            console.print(f"[yellow]Not found in index:[/yellow] doc_id {doc_id!r}")
             return
-        if len(matches) > 1:
-            console.print(
-                f"[yellow]Multiple files named '{pdf_path.name}' found "
-                f"— use the full path:[/yellow]"
-            )
-            for src in sorted(matches):
-                console.print(f"  {src}")
-            return
-        source = matches.pop()
+    else:
+        source = str(pdf_path.resolve())
         existing = collection.get(where={"source": source})
 
+        if not existing["ids"]:
+            all_meta = collection.get(include=["metadatas"])["metadatas"]
+            matches = {m["source"] for m in all_meta if m["filename"] == pdf_path.name}
+            if not matches:
+                console.print(f"[yellow]Not found in index:[/yellow] {pdf_path.name}")
+                return
+            if len(matches) > 1:
+                console.print(
+                    f"[yellow]Multiple files named '{pdf_path.name}' found "
+                    f"— use the full path or --doc-id:[/yellow]"
+                )
+                doc_ids = {
+                    m["source"]: m.get("doc_id", "")
+                    for m in all_meta
+                    if m["filename"] == pdf_path.name
+                }
+                for src in sorted(matches):
+                    did = doc_ids.get(src, "")
+                    hint = f"  [dim](doc_id: {did})[/dim]" if did else ""
+                    console.print(f"  {src}{hint}")
+                return
+            source = matches.pop()
+            existing = collection.get(where={"source": source})
+
+    meta0 = existing["metadatas"][0]
+    stored_doc_id = meta0.get("doc_id", "")
+    source = meta0.get("source", "")
+    filename = meta0.get("filename", "")
     collection.delete(ids=existing["ids"])
-    remove_file(Path(source).name)
+    _remove_stored_file(stored_doc_id, source, filename)
+    display = Path(source).name if source else filename
     console.print(
         f"[green]Removed[/green] {len(existing['ids'])} chunks for "
-        f"{Path(source).name}  [dim]({source})[/dim]"
+        f"{display}  [dim]({source})[/dim]"
     )
 
 
@@ -2312,19 +2432,27 @@ def cmd_project_remove(name: str) -> None:
         console.print(f"[yellow]Project not found:[/yellow] {name}")
         return
 
-    # Collect unique filenames for storage cleanup
-    filenames = {m["filename"] for m in existing["metadatas"]}
+    # Collect unique documents for storage cleanup (keyed by doc_id when present,
+    # falling back to source/filename for legacy entries)
+    docs: dict[str, dict] = {}
+    for m in existing["metadatas"]:
+        key = m.get("doc_id") or m.get("source") or m.get("filename", "")
+        docs.setdefault(key, m)
     collection.delete(ids=existing["ids"])
 
-    for filename in filenames:
-        # Only remove stored file if no other chunks reference it
-        remaining = collection.get(where={"filename": filename})
+    for m in docs.values():
+        did = m.get("doc_id", "")
+        # Only remove the stored file if no other chunks reference this document
+        if did:
+            remaining = collection.get(where={"doc_id": did})
+        else:
+            remaining = collection.get(where={"filename": m.get("filename", "")})
         if not remaining["ids"]:
-            remove_file(filename)
+            _remove_stored_file(did, m.get("source", ""), m.get("filename", ""))
 
     console.print(
         f"[green]Removed[/green] project '{name}': "
-        f"{len(existing['ids'])} chunks, {len(filenames)} file(s)"
+        f"{len(existing['ids'])} chunks, {len(docs)} file(s)"
     )
 
     remove_project_meta(name)
