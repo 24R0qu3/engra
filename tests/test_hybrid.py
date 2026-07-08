@@ -246,6 +246,60 @@ def test_invalid_mode_raises(monkeypatch):
         cmd._data_search("q", mode="bogus")
 
 
+# ── confidence field ─────────────────────────────────────────────────────────
+
+
+def test_confidence_present_and_top_is_one(monkeypatch):
+    import engra.commands as cmd
+
+    col = MagicMock()
+    col.count.return_value = 3
+    col.get.return_value = {"ids": ["id0", "id1", "id2"]}
+    col.query.return_value = {
+        "documents": [["hit a", "hit b", "hit c"]],
+        "metadatas": [[META, META, META]],
+        "distances": [[0.1, 0.3, 0.6]],  # scores 0.9, 0.7, 0.4
+        "ids": [["id0", "id1", "id2"]],
+    }
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    results = cmd._data_search("q", mode="dense", rerank=False, diversify=False)
+    assert len(results) == 3
+    for r in results:
+        assert "confidence" in r
+        assert 0.0 <= r["confidence"] <= 1.0
+        assert "score" in r  # existing field untouched
+    # the strongest hit normalises to 1.0 (mirrors _normalize_scores top-is-one)
+    top = max(results, key=lambda r: r["score"])
+    assert top["confidence"] == 1.0
+    # weakest normalises to the floor
+    weakest = min(results, key=lambda r: r["score"])
+    assert weakest["confidence"] == 0.0
+
+
+def test_confidence_single_result_is_one(monkeypatch):
+    import engra.commands as cmd
+
+    col = MagicMock()
+    col.count.return_value = 1
+    col.get.return_value = {"ids": ["id0"]}
+    col.query.return_value = {
+        "documents": [["only hit"]],
+        "metadatas": [[META]],
+        "distances": [[0.2]],
+        "ids": [["id0"]],
+    }
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    results = cmd._data_search("q", mode="dense", rerank=False, diversify=False)
+    assert len(results) == 1
+    assert results[0]["confidence"] == 1.0
+
+
 # ── _mmr_select ───────────────────────────────────────────────────────────────
 
 

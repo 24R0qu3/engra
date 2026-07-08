@@ -69,7 +69,10 @@ async def list_tools() -> list[mcp_types.Tool]:
             description=(
                 "Semantic search over indexed documents. "
                 "Returns ranked chunks with filename, page, score, and text. "
-                "projects=null uses the active session; pass [] to search globally."
+                "projects=null uses the active session; pass [] to search globally. "
+                "Response is an envelope {results, not_found, reason?}: not_found is "
+                "true (with a human-readable reason) when nothing matched or the best "
+                "result is below the confidence threshold."
             ),
             annotations=_annotations(readOnlyHint=True),
             inputSchema={
@@ -406,7 +409,7 @@ def _validate_index_paths(paths: list[Path]) -> None:
 
 def _dispatch(name: str, args: dict):
     if name == "engra_search":
-        return _data_search(
+        results = _data_search(
             query=args["query"],
             top_k=args.get("top", 5),
             min_score=args.get("min_score", DEFAULT_MIN_SCORE),
@@ -416,6 +419,21 @@ def _dispatch(name: str, args: dict):
             follow_links=args.get("follow_links", False),
             mode=args.get("mode", "hybrid"),
         )
+        # Wrap in a not_found envelope so an agent has a machine-readable signal for
+        # "the index doesn't have this" vs. "try another query". Confidence is
+        # relative to the returned set (never cross-query comparable), but reusing
+        # DEFAULT_MIN_SCORE as the floor gates responses whose best hit is weak even
+        # relative to its own peers.
+        if not results:
+            return {"results": results, "not_found": True, "reason": "no matching chunks"}
+        best_confidence = max(hit["confidence"] for hit in results)
+        if best_confidence < DEFAULT_MIN_SCORE:
+            return {
+                "results": results,
+                "not_found": True,
+                "reason": "no results above confidence threshold",
+            }
+        return {"results": results, "not_found": False}
     elif name == "engra_get_chunk":
         page = args["page"]
         return _data_get_chunks(

@@ -1120,6 +1120,12 @@ def _data_search(
     diversify=True (default), applies Maximal Marginal Relevance over the candidate
     pool so the final top_k trades a little relevance for topical spread; needs the
     query embedding, so it is a no-op in pure keyword mode.
+
+    Each returned hit also carries a "confidence" in [0, 1]: the min-max normalised
+    relevance (rerank_score when present, else score) computed over THIS response's
+    result set. It is relative — the strongest hit returned is ~1.0 and the weakest
+    ~0.0 — and is NOT comparable across queries; use the raw absolute "score" for
+    that. Alongside "score"/"rerank_score", never replacing them.
     """
     if mode not in ("dense", "keyword", "hybrid"):
         raise ValueError(f"mode must be 'dense', 'keyword', or 'hybrid', got {mode!r}")
@@ -1229,6 +1235,14 @@ def _data_search(
 
     if follow_links and output and query_embedding is not None:
         output.extend(_fetch_linked_results(query_embedding, output, collection, active_projects))
+
+    # Attach a per-response "confidence" (min-max normalised over the final result
+    # set, using rerank_score when present else score). This is RELATIVE to the hits
+    # returned in THIS response — the top hit is ~1.0, the weakest ~0.0 — and is NOT
+    # comparable across queries, unlike the raw absolute "score" it sits beside.
+    relevance = [hit.get("rerank_score", hit["score"]) for hit in output]
+    for hit, conf in zip(output, _normalize_scores(relevance)):
+        hit["confidence"] = round(conf, 4)
 
     return output
 
