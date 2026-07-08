@@ -874,11 +874,7 @@ def _where_col(metas, docs=None):
     col.count.return_value = len(metas)
 
     def _get(where=None, include=None, limit=None):
-        rows = [
-            (m, d, f"id{i}")
-            for i, (m, d) in enumerate(zip(metas, docs))
-            if _match(m, where)
-        ]
+        rows = [(m, d, f"id{i}") for i, (m, d) in enumerate(zip(metas, docs)) if _match(m, where)]
         if limit is not None:
             rows = rows[:limit]
         return {
@@ -1018,7 +1014,6 @@ def test_backward_compat_single_doc_without_doc_id(monkeypatch):
 
 def test_backward_compat_missing_doc_id_not_treated_as_ambiguous(monkeypatch):
     """Two legacy chunks (no doc_id) for the same file are one bucket, not ambiguous."""
-    import engra.commands as cmd
     from engra.commands import _resolve_doc_scope
 
     legacy = [

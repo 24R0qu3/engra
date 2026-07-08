@@ -394,9 +394,7 @@ class AmbiguousFilenameError(ValueError):
     def __init__(self, filename: str, candidates: list[dict]):
         self.filename = filename
         self.candidates = candidates  # [{"doc_id": ..., "source": ...}, ...]
-        listing = "\n".join(
-            f"  {c['doc_id']}  ({c['source']})" for c in candidates
-        )
+        listing = "\n".join(f"  {c['doc_id']}  ({c['source']})" for c in candidates)
         super().__init__(
             f"Filename {filename!r} matches {len(candidates)} distinct documents. "
             f"Disambiguate by passing a doc_id:\n{listing}"
@@ -2005,9 +2003,7 @@ def cmd_get(
         return
 
     # Stale/missing check for this file
-    file_metas_list: list[dict] = (
-        col.get(where=scope, include=["metadatas"]).get("metadatas") or []
-    )
+    file_metas_list: list[dict] = col.get(where=scope, include=["metadatas"]).get("metadatas") or []
     if file_metas_list:
         _warn_stale_from_metas([file_metas_list[0]])
 
@@ -2234,8 +2230,7 @@ def cmd_remove(pdf_path: Path, doc_id: str | None = None) -> None:
     _remove_stored_file(stored_doc_id, source, filename)
     display = Path(source).name if source else filename
     console.print(
-        f"[green]Removed[/green] {len(existing['ids'])} chunks for "
-        f"{display}  [dim]({source})[/dim]"
+        f"[green]Removed[/green] {len(existing['ids'])} chunks for {display}  [dim]({source})[/dim]"
     )
 
 
