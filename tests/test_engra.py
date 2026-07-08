@@ -1,15 +1,19 @@
 import argparse
 import logging
+import re
 import tomllib
 from pathlib import Path
 
 import pytest
 
+import engra.commands as commands
 from engra.commands import (
     CHUNK_OVERLAP,
     CHUNK_SIZE,
     DEFAULT_MIN_SCORE,
     MODEL_NAME,
+    MODEL_TOKEN_LIMIT,
+    _count_tokens,
     _data_list_members,
     _fetch_linked_results,
     _find_seq_index,
@@ -40,6 +44,35 @@ from engra.readers import (
 )
 from engra.storage import CACHE_DIR, clear_session, read_session, write_session
 
+
+class _FakeEncoding:
+    def __init__(self, ids, offsets):
+        self.ids = ids
+        self.offsets = offsets
+
+
+class _FakeTokenizer:
+    """Whitespace-word tokenizer stand-in for tests.
+
+    Avoids a network fetch of the real HuggingFace tokenizer; counts one token
+    per whitespace-separated word, which is enough to exercise chunk_text's
+    boundary logic deterministically.
+    """
+
+    def encode(self, text, add_special_tokens=True):
+        ids = []
+        offsets = []
+        for m in re.finditer(r"\S+", text):
+            ids.append(0)
+            offsets.append((m.start(), m.end()))
+        return _FakeEncoding(ids, offsets)
+
+
+@pytest.fixture(autouse=True)
+def _fake_tokenizer(monkeypatch):
+    monkeypatch.setattr(commands, "_tokenizer", _FakeTokenizer())
+
+
 # ── chunk_text ────────────────────────────────────────────────────────────────
 
 
@@ -49,31 +82,31 @@ def test_short_text_single_chunk():
 
 
 def test_exact_chunk_size_single_chunk():
-    text = "x" * CHUNK_SIZE
+    text = "word " * CHUNK_SIZE  # exactly CHUNK_SIZE tokens under the word-based fake tokenizer
     assert len(chunk_text(text)) == 1
 
 
 def test_long_text_multiple_chunks():
-    # Use text > 2000 chars with paragraph breaks so actual splitting occurs
-    text = "word " * 500  # ~2500 chars
+    # 500 tokens > CHUNK_SIZE (450), with paragraph breaks so actual splitting occurs
+    text = "word " * 500
     chunks = chunk_text(text)
     assert len(chunks) > 1
 
 
 def test_chunks_have_overlap():
-    # Use paragraph-separated text to ensure actual splitting
-    text = "\n\n".join(["sentence." * 100 for _ in range(5)])
+    # Use paragraph-separated text (500 tokens total) to ensure actual splitting
+    text = "\n\n".join(["sentence. " * 100 for _ in range(5)])
     chunks = chunk_text(text)
     if len(chunks) > 1:
         # end of first chunk should appear at start of second
-        overlap = chunks[0][-CHUNK_OVERLAP:]
-        assert chunks[1].startswith(overlap)
+        overlap_words = chunks[0].split()[-CHUNK_OVERLAP:]
+        assert chunks[1].split()[: len(overlap_words)] == overlap_words
 
 
 def test_chunk_max_size():
-    text = "word " * 500  # 2500 chars > CHUNK_SIZE
+    text = "word " * 500  # 500 tokens > CHUNK_SIZE
     for chunk in chunk_text(text):
-        assert len(chunk) <= CHUNK_SIZE + CHUNK_OVERLAP
+        assert _count_tokens(chunk) <= CHUNK_SIZE + CHUNK_OVERLAP
 
 
 def test_empty_text():
@@ -2197,7 +2230,7 @@ def test_data_index_atomic_section_not_split(tmp_path, monkeypatch):
     import engra.commands as cmd
     from engra.readers import Section
 
-    long_text = "x" * (CHUNK_SIZE * 3)
+    long_text = "x " * (CHUNK_SIZE * 3)
     atomic_section = Section(text=long_text, phys_page=1, page_label="Big", total=1, atomic=True)
     monkeypatch.setattr(cmd, "read_file", lambda path: [atomic_section])
     monkeypatch.setattr(cmd, "store_file", lambda path, copy=True: path)
@@ -2252,6 +2285,29 @@ def test_data_index_nonatomic_long_section_is_split(tmp_path, monkeypatch):
     cmd._data_index([f], store=False, auto_describe=False)
 
     assert len(added_ids) > 1
+
+
+def test_prepare_chunks_warns_when_breadcrumb_pushes_over_limit(tmp_path, monkeypatch, caplog):
+    """A breadcrumb long enough to push an already-fit chunk over MODEL_TOKEN_LIMIT logs."""
+    import engra.commands as cmd
+    from engra.readers import Section
+
+    breadcrumb = "Section " * MODEL_TOKEN_LIMIT
+    section = Section(
+        text="body" * 20,  # >= MIN_CHARS but a single token under the fake word tokenizer
+        phys_page=1,
+        page_label="Sec",
+        total=1,
+        atomic=True,
+        breadcrumb=breadcrumb,
+    )
+    monkeypatch.setattr(cmd, "read_file", lambda path: [section])
+
+    f = tmp_path / "test.txt"
+    f.write_text("dummy")
+    with caplog.at_level(logging.WARNING, logger="engra.commands"):
+        cmd._prepare_chunks(f, "proj", "prefix", "2026-01-01T00:00:00", None)
+    assert any("token" in r.message.lower() for r in caplog.records)
 
 
 # ── _data_search new result fields (Batch 1) ─────────────────────────────────
