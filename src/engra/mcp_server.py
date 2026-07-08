@@ -104,6 +104,18 @@ async def list_tools() -> list[mcp_types.Tool]:
                             "(links_to/linked_from/cross_references)"
                         ),
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["dense", "keyword", "hybrid"],
+                        "default": "hybrid",
+                        "description": (
+                            "Retrieval mode. 'hybrid' (default) fuses vector similarity "
+                            "with BM25 keyword matching via Reciprocal Rank Fusion — best "
+                            "for exact tokens (part numbers, error/PGN codes, symbol names) "
+                            "that pure vector search misses. 'dense' = vector only; "
+                            "'keyword' = BM25 only."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -392,6 +404,7 @@ def _dispatch(name: str, args: dict):
             filename=args.get("filename"),
             projects=args.get("projects"),
             follow_links=args.get("follow_links", False),
+            mode=args.get("mode", "hybrid"),
         )
     elif name == "engra_get_chunk":
         page = args["page"]

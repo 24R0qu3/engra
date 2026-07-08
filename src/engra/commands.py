@@ -31,6 +31,10 @@ from engra.storage import (
     FILES_DIR,
     clear_session,
     ensure_dirs,
+    fts_add,
+    fts_delete_by_ids,
+    fts_search,
+    fts_update_project,
     read_projects,
     read_session,
     remove_file,
@@ -430,6 +434,67 @@ def _build_where(
     return {"$and": clauses}
 
 
+def _where_to_fts_sql(where: dict | None) -> str | None:
+    """Translate the chromadb where dict from _build_where into an FTS5 SQL fragment.
+
+    Handles exactly the shapes _build_where emits: ``{"project": v}``,
+    ``{"project": {"$in": [...]}}``, ``{"filename": v}`` and an ``$and`` of those.
+    The columns (project/filename) map onto the FTS5 UNINDEXED columns of the same
+    name. Literal values are single-quote-escaped. Returns None for no filter.
+    """
+    if not where:
+        return None
+
+    def _lit(v) -> str:
+        return "'" + str(v).replace("'", "''") + "'"
+
+    def _clause(d: dict) -> str:
+        parts: list[str] = []
+        for col, val in d.items():
+            if col == "$and":
+                sub = [_clause(c) for c in val]
+                sub = [s for s in sub if s]
+                if sub:
+                    parts.append("(" + " AND ".join(sub) + ")")
+            elif isinstance(val, dict) and "$in" in val:
+                values = ", ".join(_lit(x) for x in val["$in"])
+                parts.append(f"{col} IN ({values})")
+            else:
+                parts.append(f"{col} = {_lit(val)}")
+        return " AND ".join(parts)
+
+    return _clause(where) or None
+
+
+def _reciprocal_rank_fusion(
+    ranked_lists: list[list[str]], k: int = 60
+) -> list[tuple[str, float]]:
+    """Fuse several ranked id lists via Reciprocal Rank Fusion.
+
+    Each list is chunk ids in best-first order. An id's fused score is
+    ``sum(1 / (k + rank))`` over every list it appears in (1-based rank). Returns
+    (id, score) pairs sorted by score descending, id ascending as a stable
+    tiebreak. Pure — no index access — so it is unit-testable in isolation.
+    """
+    scores: dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank, cid in enumerate(ranked, start=1):
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors (matches chromadb's 1 - cosine distance)."""
+    import math
+
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
 # ── Document identity / disambiguation ────────────────────────────────────────
 
 
@@ -705,6 +770,13 @@ def _data_index(
                     metadatas=metadatas[i : i + batch],
                 )
             t_chroma_write += time.perf_counter() - _t0
+            # Mirror the same chunks into the keyword (FTS5) index.
+            fts_add(
+                [
+                    (cid, doc, meta["doc_id"], meta["project"], meta["filename"])
+                    for cid, doc, meta in zip(ids, documents, metadatas)
+                ]
+            )
 
         sections_indexed = len({m["page"] for m in metadatas})
         results.append(
@@ -770,7 +842,11 @@ def _data_index(
                 continue
             if force or source_key in already_indexed:
                 _t0 = time.perf_counter()
+                # delete-by-where returns no ids, so fetch them first to mirror
+                # the removal into the keyword index before dropping the vectors.
+                stale_ids = collection.get(where={"source": source_key}, include=[])["ids"]
                 collection.delete(where={"source": source_key})
+                fts_delete_by_ids(stale_ids)
                 t_chroma_query += time.perf_counter() - _t0
                 reindexed = True
 
@@ -893,41 +969,47 @@ def _fetch_linked_results(
     return linked
 
 
-def _data_search(
-    query: str,
-    top_k: int = 5,
-    min_score: float = 0.0,
-    filename: str | None = None,
-    projects: list[str] | None = None,
-    rerank: bool = False,
-    follow_links: bool = False,
-) -> list[dict]:
-    """Semantic search. Returns list of result dicts with text and metadata.
+def _result_from_meta(text: str, meta: dict, score: float, retrieval: str) -> dict:
+    """Build a search result dict from a chunk's text + chromadb metadata.
 
-    projects=None uses the active session; pass [] to search globally.
-    When rerank=True, fetches top_k*3 candidates and re-scores with a cross-encoder.
-    When follow_links=True, appends the best chunk from each file linked by top results.
+    Shared by every retrieval path (dense, keyword, fused) so the output shape is
+    identical regardless of which arm surfaced the chunk. *retrieval* records the
+    provenance ("dense" | "keyword" | "both") for debugging.
     """
-    collection = get_collection()
-    if collection.count() == 0:
-        return []
+    return {
+        "filename": meta["filename"],
+        "doc_id": meta.get("doc_id", ""),
+        "page": meta["page"],
+        "page_label": meta.get("page_label", str(meta["page"])),
+        "total_pages": meta.get("total_pages", 0),
+        "chunk": meta.get("chunk", 0),
+        "score": round(score, 4),
+        "text": text,
+        "project": meta.get("project", ""),
+        "source": meta.get("source", ""),
+        "indexed_at": meta.get("indexed_at"),
+        "source_mtime": meta.get("source_mtime"),
+        "notable": _is_notable(text),
+        "links_to": meta.get("links_to", ""),
+        "linked_from": [],
+        "breadcrumb": meta.get("breadcrumb", ""),
+        "cross_references": [r for r in meta.get("cross_refs", "").split(",") if r],
+        "retrieval": retrieval,
+    }
 
-    active_projects = projects if projects is not None else read_session()
-    where = _build_where(active_projects, filename)
 
-    model = load_model()
-    query_embedding = next(model.query_embed([query])).tolist()
+def _dense_candidates(
+    collection: chromadb.Collection,
+    query_embedding: list[float],
+    where: dict | None,
+    n_candidates: int,
+    min_score: float,
+) -> tuple[list[str], dict[str, dict]]:
+    """Run the dense (chromadb) arm.
 
-    n_candidates = top_k * 3 if (min_score > 0 or rerank) else top_k
-    if where:
-        matched_ids = collection.get(where=where, include=[])["ids"]
-        matched_count = len(matched_ids)
-        if matched_count == 0:
-            return []
-        n_candidates = min(n_candidates, matched_count)
-    else:
-        n_candidates = min(n_candidates, collection.count())
-
+    Returns (ranked chunk ids, {chunk_id: result_dict}) for candidates scoring at
+    or above *min_score*, preserving chromadb's similarity order.
+    """
     query_kwargs: dict = dict(
         query_embeddings=[query_embedding],
         n_results=n_candidates,
@@ -937,45 +1019,133 @@ def _data_search(
         query_kwargs["where"] = where
 
     results = collection.query(**query_kwargs)
+    ids = results["ids"][0]
     docs = results["documents"][0]
     metas = results["metadatas"][0]
     distances = results["distances"][0]
 
-    output: list[dict] = []
-    shown = 0
-    for text, meta, dist in zip(docs, metas, distances):
+    ranked_ids: list[str] = []
+    by_id: dict[str, dict] = {}
+    for cid, text, meta, dist in zip(ids, docs, metas, distances):
         score = 1.0 - dist
         if score < min_score:
             continue
-        shown += 1
-        if not rerank and shown > top_k:
-            break
-        output.append(
-            {
-                "filename": meta["filename"],
-                "doc_id": meta.get("doc_id", ""),
-                "page": meta["page"],
-                "page_label": meta.get("page_label", str(meta["page"])),
-                "total_pages": meta.get("total_pages", 0),
-                "chunk": meta.get("chunk", 0),
-                "score": round(score, 4),
-                "text": text,
-                "project": meta.get("project", ""),
-                "source": meta.get("source", ""),
-                "indexed_at": meta.get("indexed_at"),
-                "source_mtime": meta.get("source_mtime"),
-                "notable": _is_notable(text),
-                "links_to": meta.get("links_to", ""),
-                "linked_from": [],
-                "breadcrumb": meta.get("breadcrumb", ""),
-                "cross_references": [r for r in meta.get("cross_refs", "").split(",") if r],
-            }
+        ranked_ids.append(cid)
+        by_id[cid] = _result_from_meta(text, meta, score, "dense")
+    return ranked_ids, by_id
+
+
+def _data_search(
+    query: str,
+    top_k: int = 5,
+    min_score: float = 0.0,
+    filename: str | None = None,
+    projects: list[str] | None = None,
+    rerank: bool = False,
+    follow_links: bool = False,
+    mode: str = "hybrid",
+) -> list[dict]:
+    """Search indexed documents. Returns a list of result dicts with text + metadata.
+
+    mode:
+      - "dense":   pure vector similarity (chromadb cosine) — the original behaviour.
+      - "keyword": pure BM25 keyword match (SQLite FTS5); good for exact tokens
+                   (part numbers, error/PGN codes, symbol names) dense embeddings miss.
+      - "hybrid":  run both arms and fuse via Reciprocal Rank Fusion (default).
+
+    projects=None uses the active session; pass [] to search globally.
+    min_score gates the DENSE arm only (a cosine floor); keyword-only hits are not
+    subject to it, so exact matches dense misses still surface in hybrid mode.
+    When rerank=True, over-fetches candidates and re-scores the fused set with a
+    cross-encoder. When follow_links=True, appends the best chunk from each linked
+    file (dense/hybrid only — needs the query embedding).
+    """
+    if mode not in ("dense", "keyword", "hybrid"):
+        raise ValueError(f"mode must be 'dense', 'keyword', or 'hybrid', got {mode!r}")
+
+    collection = get_collection()
+    if collection.count() == 0:
+        return []
+
+    active_projects = projects if projects is not None else read_session()
+    where = _build_where(active_projects, filename)
+
+    # Over-fetch pool (matches the existing candidate-inflation pattern): both arms
+    # draw top_k*3 candidates in hybrid mode so fusion has something to work with.
+    overfetch = min_score > 0 or rerank or mode == "hybrid"
+    n_candidates = top_k * 3 if overfetch else top_k
+    if where:
+        matched_ids = collection.get(where=where, include=[])["ids"]
+        if not matched_ids:
+            return []
+        n_candidates = min(n_candidates, len(matched_ids))
+    else:
+        n_candidates = min(n_candidates, collection.count())
+
+    # ── Dense arm ──────────────────────────────────────────────────────────────
+    query_embedding: list[float] | None = None
+    dense_ranked: list[str] = []
+    dense_by_id: dict[str, dict] = {}
+    if mode in ("dense", "hybrid"):
+        model = load_model()
+        query_embedding = next(model.query_embed([query])).tolist()
+        dense_ranked, dense_by_id = _dense_candidates(
+            collection, query_embedding, where, n_candidates, min_score
         )
+
+    # ── Keyword arm ──────────────────────────────────────────────────────────────
+    kw_ranked: list[str] = []
+    kw_scores: dict[str, float] = {}
+    if mode in ("keyword", "hybrid"):
+        for row in fts_search(query, where=_where_to_fts_sql(where), limit=n_candidates):
+            kw_ranked.append(row["chunk_id"])
+            kw_scores[row["chunk_id"]] = row["score"]
+
+    # ── Combine ───────────────────────────────────────────────────────────────
+    if mode == "dense":
+        ordered_ids = dense_ranked
+    elif mode == "keyword":
+        ordered_ids = kw_ranked
+    else:
+        ordered_ids = [cid for cid, _ in _reciprocal_rank_fusion([dense_ranked, kw_ranked])]
+
+    # Build dicts for keyword-only ids (dense missed them): pull text/metadata from
+    # chromadb so the output shape is identical. Score them by cosine when we have a
+    # query embedding (hybrid), else by BM25 (keyword mode). Ids absent from chromadb
+    # (FTS drift) are dropped silently.
+    kw_only = [cid for cid in ordered_ids if cid not in dense_by_id]
+    fetched: dict[str, dict] = {}
+    if kw_only:
+        include = ["documents", "metadatas"]
+        if query_embedding is not None:
+            include.append("embeddings")
+        got = collection.get(ids=kw_only, include=include)
+        got_embs = got.get("embeddings")
+        for i, cid in enumerate(got["ids"]):
+            if query_embedding is not None and got_embs is not None:
+                score = _cosine_similarity(query_embedding, got_embs[i])
+            else:
+                score = -kw_scores.get(cid, 0.0)  # SQLite bm25: lower = better → negate
+            fetched[cid] = _result_from_meta(
+                got["documents"][i], got["metadatas"][i], score, "keyword"
+            )
+
+    output: list[dict] = []
+    for cid in ordered_ids:
+        if cid in dense_by_id:
+            hit = dense_by_id[cid]
+            if cid in kw_scores:
+                hit = {**hit, "retrieval": "both"}
+            output.append(hit)
+        elif cid in fetched:
+            output.append(fetched[cid])
 
     if rerank and output:
         output = _rerank_results(query, output, top_k)
+    else:
+        output = output[:top_k]
 
-    if follow_links and output:
+    if follow_links and output and query_embedding is not None:
         output.extend(_fetch_linked_results(query_embedding, output, collection, active_projects))
 
     return output
@@ -1660,6 +1830,7 @@ def cmd_search(
     output_format: str = "text",
     rerank: bool = False,
     follow_links: bool = False,
+    mode: str = "hybrid",
 ) -> None:
     if get_collection().count() == 0:
         console.print(
@@ -1679,6 +1850,7 @@ def cmd_search(
         projects=projects,
         rerank=rerank,
         follow_links=follow_links,
+        mode=mode,
     )
 
     if output_format == "json":
@@ -2287,6 +2459,7 @@ def cmd_remove(pdf_path: Path, doc_id: str | None = None) -> None:
     source = meta0.get("source", "")
     filename = meta0.get("filename", "")
     collection.delete(ids=existing["ids"])
+    fts_delete_by_ids(existing["ids"])
     _remove_stored_file(stored_doc_id, source, filename)
     display = Path(source).name if source else filename
     console.print(
@@ -2465,6 +2638,7 @@ def cmd_project_rename(old_name: str, new_name: str) -> None:
 
     new_metas = [{**m, "project": new_name} for m in existing["metadatas"]]
     collection.update(ids=existing["ids"], metadatas=new_metas)
+    fts_update_project(existing["ids"], new_name)
     console.print(
         f"[green]Renamed[/green] '{old_name}' → '{new_name}' "
         f"({len(existing['ids'])} chunks updated)"
@@ -2494,6 +2668,7 @@ def cmd_project_remove(name: str) -> None:
         key = m.get("doc_id") or m.get("source") or m.get("filename", "")
         docs.setdefault(key, m)
     collection.delete(ids=existing["ids"])
+    fts_delete_by_ids(existing["ids"])
 
     for m in docs.values():
         did = m.get("doc_id", "")
