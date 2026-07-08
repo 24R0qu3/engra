@@ -1,0 +1,22 @@
+{"query": "how does address claiming work on the ISOBUS network", "expect_filename": "iso11783-5.pdf", "expect_page": null, "note": "concept: network management address claim procedure"}
+{"query": "structure of the ISO 11783 extended data page and PGN format", "expect_filename": "iso11783-3.pdf", "expect_page": null, "note": "concept: data link layer PGN / EDP explanation"}
+{"query": "what is a virtual terminal working set master", "expect_filename": "iso11783-6.pdf", "expect_page": null, "note": "concept: VT working set master definition"}
+{"query": "task controller process data variable exchange", "expect_filename": "iso11783-10.pdf", "expect_page": null, "note": "concept: task controller process data"}
+{"query": "how are tractor ECU speed and distance messages sent", "expect_filename": "iso11783-7.pdf", "expect_page": null, "note": "concept: TECU wheel/ground speed messages"}
+{"query": "transport protocol for messages larger than eight bytes", "expect_filename": "iso11783-3.pdf", "expect_page": null, "note": "concept: TP.CM / TP.DT multi-packet transport"}
+{"query": "sequence control and section control for implements", "expect_filename": "iso11783-14.pdf", "expect_page": null, "note": "concept: sequence control part 14"}
+{"query": "file server object storage for ISOBUS clients", "expect_filename": "iso11783-13.pdf", "expect_page": null, "note": "concept: file server part 13"}
+{"query": "diagnostic trouble codes and DM1 active fault reporting", "expect_filename": "iso11783-12.pdf", "expect_page": null, "note": "concept: diagnostics DM1"}
+{"query": "meaning of the PGN 60928 message", "expect_filename": "iso11783-5.pdf", "expect_page": null, "note": "exact-token: PGN 60928 Address Claimed"}
+{"query": "DDI 271 total fuel consumption data dictionary entry", "expect_filename": "iso11783-11.pdf", "expect_page": null, "note": "exact-token: device data dictionary identifier 271"}
+{"query": "NAME field industry group value 2 agricultural", "expect_filename": "iso11783-5.pdf", "expect_page": null, "note": "exact-token: NAME industry group code"}
+{"query": "object type 0x11 InputBoolean attributes", "expect_filename": "iso11783-6.pdf", "expect_page": null, "note": "exact-token: VT object type hex code"}
+{"query": "SPN 190 engine speed parameter", "expect_filename": "iso11783-7.pdf", "expect_page": null, "note": "exact-token: SPN suspect parameter number"}
+{"query": "error code 0x03 ANY_OTHER_ERROR from VT", "expect_filename": "iso11783-6.pdf", "expect_page": null, "note": "exact-token: VT error/response code"}
+{"query": "chromadb Collection::query method signature and parameters", "expect_filename": "chromadb_api.pdf", "expect_page": null, "note": "exact-token: C++ API symbol Collection::query"}
+{"query": "EmbeddingFunction abstract base class virtual operator()", "expect_filename": "chromadb_api.pdf", "expect_page": null, "note": "exact-token: C++ symbol EmbeddingFunction"}
+{"query": "fz_open_document function return type in MuPDF", "expect_filename": "mupdf_api.pdf", "expect_page": null, "note": "exact-token: C API symbol fz_open_document"}
+{"query": "how to iterate pages and extract text from a document", "expect_filename": "mupdf_api.pdf", "expect_page": null, "note": "concept: page iteration / text extraction"}
+{"query": "control function source address 0xFE null address", "expect_filename": "iso11783-3.pdf", "expect_page": null, "note": "exact-token: null/global address 0xFE 0xFF"}
+{"query": "part number AEF-CD-042 conformance test certificate", "expect_filename": "aef_conformance.pdf", "expect_page": null, "note": "exact-token: AEF part/certificate identifier"}
+{"query": "section 6.4.2 message timeout and retransmission requirements", "expect_filename": "iso11783-3.pdf", "expect_page": null, "note": "exact-token: section identifier 6.4.2"}
