@@ -7,6 +7,7 @@ import pytest
 
 from engra import storage
 from engra.commands import (
+    _mmr_select,
     _reciprocal_rank_fusion,
     _where_to_fts_sql,
 )
@@ -243,3 +244,148 @@ def test_invalid_mode_raises(monkeypatch):
     monkeypatch.setattr(cmd, "read_session", lambda: [])
     with pytest.raises(ValueError):
         cmd._data_search("q", mode="bogus")
+
+
+# ── _mmr_select ───────────────────────────────────────────────────────────────
+
+
+def _mmr_col(embeddings_by_id):
+    col = MagicMock()
+
+    def _get(ids=None, include=None):
+        return {"ids": ids, "embeddings": [embeddings_by_id[i] for i in ids]}
+
+    col.get.side_effect = _get
+    return col
+
+
+def test_mmr_select_returns_all_when_within_top_k():
+    candidates = [{"_cid": "a", "score": 0.9}, {"_cid": "b", "score": 0.5}]
+    col = _mmr_col({"a": [1.0, 0.0], "b": [0.0, 1.0]})
+    assert _mmr_select(col, candidates, top_k=5) == candidates
+
+
+def test_mmr_select_prefers_diversity_over_near_duplicate():
+    # b is the top match; a is a near-duplicate of b (same embedding, close score);
+    # c is worse-scoring but embedding-orthogonal to b. MMR should pick b then c,
+    # not b then a, once a's marginal value is discounted by its similarity to b.
+    candidates = [
+        {"_cid": "a", "score": 0.9},
+        {"_cid": "b", "score": 1.0},
+        {"_cid": "c", "score": 0.5},
+    ]
+    col = _mmr_col({"a": [1.0, 0.0], "b": [1.0, 0.0], "c": [0.0, 1.0]})
+    selected = _mmr_select(col, candidates, top_k=2, lambda_mult=0.5)
+    assert [c["_cid"] for c in selected] == ["b", "c"]
+
+
+def test_mmr_select_falls_back_without_embeddings():
+    candidates = [
+        {"_cid": "a", "score": 0.9},
+        {"_cid": "b", "score": 0.5},
+        {"_cid": "c", "score": 0.1},
+    ]
+    col = MagicMock()
+    col.get.return_value = {"ids": ["a", "b", "c"], "embeddings": None}
+    assert _mmr_select(col, candidates, top_k=2) == candidates[:2]
+
+
+# ── rerank graceful degradation ─────────────────────────────────────────────────
+
+
+def test_rerank_missing_dependency_degrades_instead_of_raising(monkeypatch):
+    import engra.commands as cmd
+
+    col = MagicMock()
+    col.count.return_value = 1
+    col.get.return_value = {"ids": ["id0"]}
+    col.query.return_value = {
+        "documents": [["hit"]],
+        "metadatas": [[META]],
+        "distances": [[0.1]],
+        "ids": [["id0"]],
+    }
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+    monkeypatch.setattr(
+        cmd,
+        "_rerank_results",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("pip install 'engra[rerank]'")),
+    )
+    monkeypatch.setattr(cmd, "_rerank_warned", False)
+
+    results = cmd._data_search("q", mode="dense", rerank=True, diversify=False)
+    assert len(results) == 1  # degraded to un-reranked output, did not crash
+    assert cmd._rerank_warned is True
+
+
+def test_rerank_missing_dependency_warns_only_once(monkeypatch, caplog):
+    import logging
+
+    import engra.commands as cmd
+
+    col = MagicMock()
+    col.count.return_value = 1
+    col.get.return_value = {"ids": ["id0"]}
+    col.query.return_value = {
+        "documents": [["hit"]],
+        "metadatas": [[META]],
+        "distances": [[0.1]],
+        "ids": [["id0"]],
+    }
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+    monkeypatch.setattr(
+        cmd,
+        "_rerank_results",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("missing")),
+    )
+    monkeypatch.setattr(cmd, "_rerank_warned", False)
+
+    with caplog.at_level(logging.WARNING, logger="engra.commands"):
+        cmd._data_search("q", mode="dense", rerank=True, diversify=False)
+        cmd._data_search("q", mode="dense", rerank=True, diversify=False)
+
+    warnings = [r for r in caplog.records if "Re-ranking unavailable" in r.message]
+    assert len(warnings) == 1
+
+
+# ── rerank/diversify default wiring ──────────────────────────────────────────────
+
+
+def test_data_search_rerank_defaults_false():
+    import inspect
+
+    import engra.commands as cmd
+
+    assert inspect.signature(cmd._data_search).parameters["rerank"].default is False
+
+
+def test_data_search_diversify_defaults_true():
+    import inspect
+
+    import engra.commands as cmd
+
+    assert inspect.signature(cmd._data_search).parameters["diversify"].default is True
+
+
+def test_ask_reads_rerank_from_config(monkeypatch):
+    import engra.commands as cmd
+
+    col = MagicMock()
+    col.count.return_value = 1
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_config", lambda: {"ask": {"rerank": False}})
+
+    captured = {}
+
+    def fake_search(*args, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    cmd.cmd_ask("question")
+    assert captured.get("rerank") is False

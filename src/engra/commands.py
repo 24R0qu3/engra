@@ -136,9 +136,9 @@ def _load_reranker():
 
 def _rerank_results(query: str, hits: list[dict], top_k: int) -> list[dict]:
     """Re-rank *hits* with a cross-encoder and return the top *top_k* by rerank score."""
+    ranker = _load_reranker()  # raises RuntimeError first if flashrank is missing
     from flashrank import RerankRequest
 
-    ranker = _load_reranker()
     passages = [{"id": i, "text": h["text"]} for i, h in enumerate(hits)]
     request = RerankRequest(query=query, passages=passages)
     ranked = ranker.rerank(request)
@@ -1212,12 +1212,10 @@ def _data_search(
             # to pick a diverse subset from it; otherwise rerank straight to top_k.
             rerank_pool_size = len(output) if do_mmr else top_k
             output = _rerank_results(query, output, rerank_pool_size)
-        except RuntimeError as exc:
+        except (RuntimeError, ImportError) as exc:
             global _rerank_warned
             if not _rerank_warned:
-                logger.warning(
-                    "Re-ranking unavailable (%s); continuing without reranking.", exc
-                )
+                logger.warning("Re-ranking unavailable (%s); continuing without reranking.", exc)
                 _rerank_warned = True
             if not do_mmr:
                 output = output[:top_k]

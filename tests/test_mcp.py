@@ -798,6 +798,61 @@ def test_mcp_search_follow_links_defaults_false(monkeypatch):
     assert captured.get("follow_links") is False
 
 
+# ── engra_search rerank wiring ────────────────────────────────────────────────
+
+
+def test_mcp_search_schema_exposes_rerank():
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    search_tool = next(t for t in tools if t.name == "engra_search")
+    assert "rerank" in search_tool.inputSchema["properties"]
+    assert search_tool.inputSchema["properties"]["rerank"]["default"] is True
+
+
+def test_mcp_search_rerank_defaults_true_when_omitted(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    captured = {}
+
+    def fake_search(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    col = _col([META])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    assert captured.get("rerank") is True
+
+
+def test_mcp_search_rerank_explicit_false_respected(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    captured = {}
+
+    def fake_search(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    col = _col([META])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q", "rerank": False}))
+    assert captured.get("rerank") is False
+
+
 # ── engra_index path allowlist ────────────────────────────────────────────────
 
 
