@@ -1628,55 +1628,30 @@ def cmd_search(
         console.print(f"[yellow]{msg}[/yellow]")
 
 
-def cmd_ask(
-    question: str,
-    projects: list[str] | None = None,
-    filename: str | None = None,
-    context_chunks: int | None = None,
-) -> None:
-    """Answer a question using retrieved chunks as context (RAG)."""
+def _truncate_hits_to_budget(hits: list[dict], max_chars: int) -> tuple[list[dict], int]:
+    """Drop lowest-ranked hits (from the end) until total chunk text fits max_chars.
+
+    hits must be ordered highest-ranked first. Always keeps at least one hit.
+    Returns (kept_hits, dropped_count).
+    """
+    lengths = [len(h["text"].strip()) for h in hits]
+    total = sum(lengths)
+    dropped = 0
+    while total > max_chars and len(lengths) > 1:
+        total -= lengths.pop()
+        dropped += 1
+    return hits[: len(lengths)], dropped
+
+
+def _ask_openai(ask_cfg: dict, system_prompt: str, context_text: str, question: str) -> bool:
+    """Stream an answer from an OpenAI-compatible endpoint. Returns True on success."""
+    import json as _json
     import urllib.error
     import urllib.request
-
-    cfg = load_config()
-    ask_cfg = cfg.get("ask", {})
 
     api_base = ask_cfg.get("api_base", "http://localhost:11434/v1").rstrip("/")
     model_id = ask_cfg.get("model", "llama3")
     api_key = ask_cfg.get("api_key", "ollama")
-    top_k = context_chunks if context_chunks is not None else int(ask_cfg.get("context_chunks", 5))
-    system_prompt = ask_cfg.get(
-        "system_prompt",
-        "You are a helpful assistant. Answer the question using only the provided context. "
-        "If the context does not contain enough information, say so.",
-    )
-
-    if get_collection().count() == 0:
-        console.print(
-            "[yellow]Knowledge base is empty.[/yellow] Run: [bold]engra index <file>[/bold]"
-        )
-        return
-
-    hits = _data_search(question, top_k=top_k, projects=projects, filename=filename)
-
-    if not hits:
-        console.print("[yellow]No relevant chunks found.[/yellow]")
-        return
-
-    # Build context block
-    context_parts = []
-    for i, h in enumerate(hits, 1):
-        label = f"[{i}] {h['filename']} p.{h['page_label']}"
-        context_parts.append(f"{label}\n{h['text'].strip()}")
-    context_text = "\n\n---\n\n".join(context_parts)
-
-    # Print sources header
-    console.print(f"\n[bold]Question:[/bold] {question}")
-    console.print(f"[dim]Context: {len(hits)} chunk(s) from index[/dim]")
-    console.rule()
-
-    # Call LLM
-    import json as _json
 
     payload = _json.dumps(
         {
@@ -1722,6 +1697,100 @@ def cmd_ask(
             f"[dim]Ensure your LLM server is running at [bold]{api_base}[/bold] "
             "or configure [bold]ask.api_base[/bold] in ~/.config/engra/config.toml[/dim]"
         )
+        return False
+    return True
+
+
+def _ask_claude(ask_cfg: dict, system_prompt: str, context_text: str, question: str) -> bool:
+    """Stream an answer from the native Anthropic API. Returns True on success."""
+    import os
+
+    try:
+        import anthropic
+    except ImportError:
+        console.print(r"[red]Claude backend requires:[/red] pip install 'engra\[ai]'")
+        return False
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        console.print("[red]ANTHROPIC_API_KEY not set.[/red] Export it to use the claude backend.")
+        return False
+
+    model_id = ask_cfg.get("claude_model", "claude-haiku-4-5-20251001")
+    console.print(f"\n[bold green]Answer[/bold green] [dim](model: {model_id})[/dim]\n")
+    try:
+        client = anthropic.Anthropic()
+        with client.messages.stream(
+            model=model_id,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=[
+                {"role": "user", "content": f"Context:\n\n{context_text}\n\nQuestion: {question}"}
+            ],
+        ) as stream:
+            for text in stream.text_stream:
+                console.print(text, end="")
+    except Exception as exc:
+        console.print(f"\n[red]Claude request failed:[/red] {exc}")
+        return False
+    return True
+
+
+def cmd_ask(
+    question: str,
+    projects: list[str] | None = None,
+    filename: str | None = None,
+    context_chunks: int | None = None,
+) -> None:
+    """Answer a question using retrieved chunks as context (RAG)."""
+    cfg = load_config()
+    ask_cfg = cfg.get("ask", {})
+
+    backend = ask_cfg.get("backend", "openai")
+    top_k = context_chunks if context_chunks is not None else int(ask_cfg.get("context_chunks", 5))
+    max_context_chars = int(ask_cfg.get("max_context_chars", 12000))
+    system_prompt = ask_cfg.get(
+        "system_prompt",
+        "You are a helpful assistant. Answer the question using only the provided context. "
+        "If the context does not contain enough information, say so.",
+    )
+
+    if get_collection().count() == 0:
+        console.print(
+            "[yellow]Knowledge base is empty.[/yellow] Run: [bold]engra index <file>[/bold]"
+        )
+        return
+
+    hits = _data_search(question, top_k=top_k, projects=projects, filename=filename)
+
+    if not hits:
+        console.print("[yellow]No relevant chunks found.[/yellow]")
+        return
+
+    hits, dropped = _truncate_hits_to_budget(hits, max_context_chars)
+    if dropped:
+        console.print(
+            f"[yellow]Context truncated:[/yellow] dropped {dropped} lowest-ranked chunk(s) "
+            f"to stay within {max_context_chars} chars."
+        )
+
+    # Build context block
+    context_parts = []
+    for i, h in enumerate(hits, 1):
+        label = f"[{i}] {h['filename']} p.{h['page_label']}"
+        context_parts.append(f"{label}\n{h['text'].strip()}")
+    context_text = "\n\n---\n\n".join(context_parts)
+
+    # Print sources header
+    console.print(f"\n[bold]Question:[/bold] {question}")
+    console.print(f"[dim]Context: {len(hits)} chunk(s) from index[/dim]")
+    console.rule()
+
+    if backend == "claude":
+        ok = _ask_claude(ask_cfg, system_prompt, context_text, question)
+    else:
+        ok = _ask_openai(ask_cfg, system_prompt, context_text, question)
+
+    if not ok:
         return
 
     console.print("\n")

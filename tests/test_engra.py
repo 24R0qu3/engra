@@ -1002,6 +1002,95 @@ def test_ask_llm_connection_error(monkeypatch):
     assert "failed" in out.lower() or "LLM" in out
 
 
+def test_ask_claude_backend_missing_anthropic(monkeypatch):
+    import io
+    import sys
+
+    from rich.console import Console
+
+    import engra.commands as commands
+
+    docs = ["Some text"]
+    metas = [{"filename": "doc.pdf", "page": 1, "page_label": "1", "chunk": 0}]
+    col = _make_ask_collection(docs, metas)
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "load_model", lambda: _make_fake_model())
+    monkeypatch.setattr(commands, "read_session", lambda: [])
+    monkeypatch.setattr(
+        commands, "load_config", lambda: {"ask": {"backend": "claude", "context_chunks": 5}}
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+
+    buf = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
+
+    commands.cmd_ask("What is torque?")
+
+    out = buf.getvalue()
+    assert "engra[ai]" in out
+
+
+def test_ask_claude_backend_missing_api_key(monkeypatch):
+    import io
+    import sys
+    import types
+
+    from rich.console import Console
+
+    import engra.commands as commands
+
+    docs = ["Some text"]
+    metas = [{"filename": "doc.pdf", "page": 1, "page_label": "1", "chunk": 0}]
+    col = _make_ask_collection(docs, metas)
+    monkeypatch.setattr(commands, "get_collection", lambda: col)
+    monkeypatch.setattr(commands, "load_model", lambda: _make_fake_model())
+    monkeypatch.setattr(commands, "read_session", lambda: [])
+    monkeypatch.setattr(
+        commands, "load_config", lambda: {"ask": {"backend": "claude", "context_chunks": 5}}
+    )
+    monkeypatch.setitem(sys.modules, "anthropic", types.ModuleType("anthropic"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    buf = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
+
+    commands.cmd_ask("What is torque?")
+
+    out = buf.getvalue()
+    assert "ANTHROPIC_API_KEY" in out
+
+
+def test_truncate_hits_to_budget_drops_lowest_ranked():
+    import engra.commands as commands
+
+    hits = [
+        {"text": "a" * 5000},
+        {"text": "b" * 5000},
+        {"text": "c" * 5000},
+    ]
+    kept, dropped = commands._truncate_hits_to_budget(hits, max_chars=12000)
+    assert dropped == 1
+    assert kept == hits[:2]
+
+
+def test_truncate_hits_to_budget_keeps_all_within_budget():
+    import engra.commands as commands
+
+    hits = [{"text": "a" * 100}, {"text": "b" * 100}]
+    kept, dropped = commands._truncate_hits_to_budget(hits, max_chars=12000)
+    assert dropped == 0
+    assert kept == hits
+
+
+def test_truncate_hits_to_budget_always_keeps_one():
+    import engra.commands as commands
+
+    hits = [{"text": "a" * 50000}, {"text": "b" * 50000}]
+    kept, dropped = commands._truncate_hits_to_budget(hits, max_chars=100)
+    assert dropped == 1
+    assert kept == hits[:1]
+
+
 # ── export / import ────────────────────────────────────────────────────────────
 
 
