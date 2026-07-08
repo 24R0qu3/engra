@@ -116,6 +116,10 @@ def _is_notable(text: str) -> bool:
 
 _RERANKER_DEFAULT_MODEL = "ms-marco-MiniLM-L-12-v2"
 
+# Mirrors the FTS5-unavailable pattern in storage.get_fts_connection() and the
+# GPU-provider fallback in load_model(): warn once, then silently degrade.
+_rerank_warned = False
+
 
 def _load_reranker():
     """Load the flashrank cross-encoder; raises RuntimeError if not installed."""
@@ -1033,6 +1037,60 @@ def _dense_candidates(
     return ranked_ids, by_id
 
 
+def _mmr_select(
+    collection: chromadb.Collection,
+    candidates: list[dict],
+    top_k: int,
+    lambda_mult: float = 0.5,
+) -> list[dict]:
+    """Greedily select *top_k* diverse-yet-relevant results via Maximal Marginal Relevance.
+
+    Each candidate must carry a "_cid" key (its chromadb chunk id, stashed by the
+    caller) so embeddings can be fetched. Starts from the single highest-relevance
+    candidate, then repeatedly picks the one maximising
+    ``lambda_mult * relevance - (1 - lambda_mult) * max_similarity_to_selected``.
+    Falls back to plain truncation if fewer than top_k candidates or no embeddings
+    are available (e.g. mocked/legacy chunks without vectors on disk).
+    """
+    if len(candidates) <= top_k:
+        return candidates
+
+    ids = [c["_cid"] for c in candidates]
+    fetched = collection.get(ids=ids, include=["embeddings"])
+    fetched_embs = fetched.get("embeddings")
+    if fetched_embs is None:
+        return candidates[:top_k]
+    emb_by_id = dict(zip(fetched["ids"], fetched_embs))
+
+    raw_relevance = [c.get("rerank_score", c["score"]) for c in candidates]
+    relevance = _normalize_scores(raw_relevance)
+
+    remaining = list(range(len(candidates)))
+    selected: list[int] = [max(remaining, key=lambda i: relevance[i])]
+    remaining.remove(selected[0])
+
+    while remaining and len(selected) < top_k:
+
+        def _mmr_score(i: int) -> float:
+            emb = emb_by_id.get(candidates[i]["_cid"])
+            if emb is None:
+                max_sim = 0.0
+            else:
+                sims = [
+                    _cosine_similarity(emb, emb_by_id[candidates[j]["_cid"]])
+                    for j in selected
+                    if emb_by_id.get(candidates[j]["_cid"]) is not None
+                ]
+                max_sim = max(sims) if sims else 0.0
+            return lambda_mult * relevance[i] - (1 - lambda_mult) * max_sim
+
+        nxt = max(remaining, key=_mmr_score)
+        selected.append(nxt)
+        remaining.remove(nxt)
+
+    return [candidates[i] for i in selected]
+
+
 def _data_search(
     query: str,
     top_k: int = 5,
@@ -1042,6 +1100,7 @@ def _data_search(
     rerank: bool = False,
     follow_links: bool = False,
     mode: str = "hybrid",
+    diversify: bool = True,
 ) -> list[dict]:
     """Search indexed documents. Returns a list of result dicts with text + metadata.
 
@@ -1055,8 +1114,12 @@ def _data_search(
     min_score gates the DENSE arm only (a cosine floor); keyword-only hits are not
     subject to it, so exact matches dense misses still surface in hybrid mode.
     When rerank=True, over-fetches candidates and re-scores the fused set with a
-    cross-encoder. When follow_links=True, appends the best chunk from each linked
-    file (dense/hybrid only — needs the query embedding).
+    cross-encoder; if the optional dependency isn't installed this degrades to the
+    un-reranked results (warns once). When follow_links=True, appends the best chunk
+    from each linked file (dense/hybrid only — needs the query embedding). When
+    diversify=True (default), applies Maximal Marginal Relevance over the candidate
+    pool so the final top_k trades a little relevance for topical spread; needs the
+    query embedding, so it is a no-op in pure keyword mode.
     """
     if mode not in ("dense", "keyword", "hybrid"):
         raise ValueError(f"mode must be 'dense', 'keyword', or 'hybrid', got {mode!r}")
@@ -1134,14 +1197,37 @@ def _data_search(
             hit = dense_by_id[cid]
             if cid in kw_scores:
                 hit = {**hit, "retrieval": "both"}
-            output.append(hit)
         elif cid in fetched:
-            output.append(fetched[cid])
+            hit = fetched[cid]
+        else:
+            continue
+        hit = {**hit, "_cid": cid}  # internal-only, stripped before return
+        output.append(hit)
+
+    do_mmr = diversify and query_embedding is not None
 
     if rerank and output:
-        output = _rerank_results(query, output, top_k)
+        try:
+            # Keep the full pool ranked (not sliced to top_k) when MMR still needs
+            # to pick a diverse subset from it; otherwise rerank straight to top_k.
+            rerank_pool_size = len(output) if do_mmr else top_k
+            output = _rerank_results(query, output, rerank_pool_size)
+        except RuntimeError as exc:
+            global _rerank_warned
+            if not _rerank_warned:
+                logger.warning(
+                    "Re-ranking unavailable (%s); continuing without reranking.", exc
+                )
+                _rerank_warned = True
+            if not do_mmr:
+                output = output[:top_k]
+
+    if do_mmr:
+        output = _mmr_select(collection, output, top_k)
     else:
         output = output[:top_k]
+
+    output = [{k: v for k, v in hit.items() if k != "_cid"} for hit in output]
 
     if follow_links and output and query_embedding is not None:
         output.extend(_fetch_linked_results(query_embedding, output, collection, active_projects))
@@ -2062,6 +2148,7 @@ def cmd_ask(
     backend = ask_cfg.get("backend", "openai")
     top_k = context_chunks if context_chunks is not None else int(ask_cfg.get("context_chunks", 5))
     max_context_chars = int(ask_cfg.get("max_context_chars", 12000))
+    rerank = ask_cfg.get("rerank", True)
     system_prompt = ask_cfg.get(
         "system_prompt",
         "You are a helpful assistant. Answer the question using only the provided context. "
@@ -2074,7 +2161,7 @@ def cmd_ask(
         )
         return
 
-    hits = _data_search(question, top_k=top_k, projects=projects, filename=filename)
+    hits = _data_search(question, top_k=top_k, projects=projects, filename=filename, rerank=rerank)
 
     if not hits:
         console.print("[yellow]No relevant chunks found.[/yellow]")

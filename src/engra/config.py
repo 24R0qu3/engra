@@ -24,6 +24,7 @@ DEFAULTS: dict = {
         "claude_model": "claude-haiku-4-5-20251001",
         "context_chunks": 5,
         "max_context_chars": 12000,
+        "rerank": True,
         "system_prompt": (
             "You are a helpful assistant. Answer the question using only the provided context. "
             "If the context does not contain enough information, say so."
@@ -69,6 +70,8 @@ api_key = "ollama"
 context_chunks = 5
 # max_context_chars: safety cap on total retrieved-context size sent to the LLM
 max_context_chars = 12000
+# rerank: re-score retrieved context with a cross-encoder before answering
+rerank = true
 
 [autodescribe]
 # backend: "openai" (Ollama/any OpenAI-compat) | "claude" (Anthropic API) | "disabled"
