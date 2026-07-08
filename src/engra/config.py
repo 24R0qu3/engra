@@ -15,10 +15,15 @@ DEFAULTS: dict = {
         "copy": True,  # False = symlink
     },
     "ask": {
+        # "openai" = OpenAI-compatible endpoint (Ollama or any compat server, no extra dep)
+        # "claude" = Anthropic native API (requires: pip install 'engra[ai]' + ANTHROPIC_API_KEY)
+        "backend": "openai",
         "api_base": "http://localhost:11434/v1",
         "model": "llama3",
         "api_key": "ollama",
+        "claude_model": "claude-haiku-4-5-20251001",
         "context_chunks": 5,
+        "max_context_chars": 12000,
         "system_prompt": (
             "You are a helpful assistant. Answer the question using only the provided context. "
             "If the context does not contain enough information, say so."
@@ -53,11 +58,16 @@ type = "local"
 copy = true  # set to false to symlink instead of copying files
 
 [ask]
+# backend: "openai" (Ollama/any OpenAI-compat) | "claude" (Anthropic API)
+backend = "openai"
 # OpenAI-compatible LLM endpoint (default: local Ollama)
 api_base = "http://localhost:11434/v1"
 model = "llama3"
 api_key = "ollama"
+# claude_model = "claude-haiku-4-5-20251001"  # used when backend = "claude"
 context_chunks = 5
+# max_context_chars: safety cap on total retrieved-context size sent to the LLM
+max_context_chars = 12000
 
 [autodescribe]
 # backend: "openai" (Ollama/any OpenAI-compat) | "claude" (Anthropic API) | "disabled"
