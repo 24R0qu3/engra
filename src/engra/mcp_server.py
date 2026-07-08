@@ -104,6 +104,15 @@ async def list_tools() -> list[mcp_types.Tool]:
                             "(links_to/linked_from/cross_references)"
                         ),
                     },
+                    "rerank": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "Re-score the fused candidate pool with a cross-encoder for "
+                            "higher precision. Defaults on for MCP search; silently falls "
+                            "back to unreranked results if the optional dependency is missing."
+                        ),
+                    },
                     "mode": {
                         "type": "string",
                         "enum": ["dense", "keyword", "hybrid"],
@@ -403,6 +412,7 @@ def _dispatch(name: str, args: dict):
             min_score=args.get("min_score", DEFAULT_MIN_SCORE),
             filename=args.get("filename"),
             projects=args.get("projects"),
+            rerank=args.get("rerank", True),
             follow_links=args.get("follow_links", False),
             mode=args.get("mode", "hybrid"),
         )
