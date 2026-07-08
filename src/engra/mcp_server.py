@@ -130,6 +130,14 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "default": None,
                         "description": "Specific chunk index",
                     },
+                    "doc_id": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": (
+                            "Authoritative document id (from search results). "
+                            "Disambiguates when the same filename exists in multiple projects."
+                        ),
+                    },
                 },
                 "required": ["filename", "page"],
             },
@@ -157,6 +165,14 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "type": "integer",
                         "default": 1,
                         "description": "Chunks to retrieve in each direction",
+                    },
+                    "doc_id": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": (
+                            "Authoritative document id (from search results). "
+                            "Disambiguates when the same filename exists in multiple projects."
+                        ),
                     },
                 },
                 "required": ["filename", "page", "chunk"],
@@ -213,6 +229,14 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "type": ["string", "null"],
                         "default": None,
                         "description": "Case-insensitive substring to filter section labels",
+                    },
+                    "doc_id": {
+                        "type": ["string", "null"],
+                        "default": None,
+                        "description": (
+                            "Authoritative document id (from search results). "
+                            "Disambiguates when the same filename exists in multiple projects."
+                        ),
                     },
                 },
                 "required": ["filename"],
@@ -376,6 +400,7 @@ def _dispatch(name: str, args: dict):
             page_start=page,
             page_end=args.get("page_end") or page,
             chunk=args.get("chunk"),
+            doc_id=args.get("doc_id"),
         )
     elif name == "engra_get_neighbors":
         return _data_get_neighbors(
@@ -384,6 +409,7 @@ def _dispatch(name: str, args: dict):
             chunk=args["chunk"],
             direction=args.get("direction", "next"),
             count=args.get("count", 1),
+            doc_id=args.get("doc_id"),
         )
     elif name == "engra_list_projects":
         return _data_list_projects()
@@ -392,6 +418,7 @@ def _dispatch(name: str, args: dict):
             filename=args["filename"],
             projects=args.get("projects"),
             section_filter=args.get("section_filter"),
+            doc_id=args.get("doc_id"),
         )
     elif name == "engra_list_files":
         return _data_list_files(project=args.get("project"))

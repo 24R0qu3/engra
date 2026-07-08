@@ -847,3 +847,233 @@ def test_validate_index_paths_raises_for_disallowed(tmp_path, monkeypatch):
         ms._validate_index_paths([tmp_path / "outside.txt"])
 
     ms._validate_index_paths([root / "ok.txt"])  # does not raise
+
+
+# ── doc_id disambiguation (same-basename collision) ───────────────────────────
+
+
+def _match(meta, where):
+    """Evaluate a (subset of) chromadb where-clause against a single metadata dict."""
+    if not where:
+        return True
+    if "$and" in where:
+        return all(_match(meta, c) for c in where["$and"])
+    for key, val in where.items():
+        if isinstance(val, dict) and "$in" in val:
+            if meta.get(key) not in val["$in"]:
+                return False
+        elif meta.get(key) != val:
+            return False
+    return True
+
+
+def _where_col(metas, docs=None):
+    """Collection mock whose .get/.query honour the where-clause (incl. doc_id)."""
+    docs = docs or [f"doc{i}" for i in range(len(metas))]
+    col = MagicMock()
+    col.count.return_value = len(metas)
+
+    def _get(where=None, include=None, limit=None):
+        rows = [(m, d, f"id{i}") for i, (m, d) in enumerate(zip(metas, docs)) if _match(m, where)]
+        if limit is not None:
+            rows = rows[:limit]
+        return {
+            "metadatas": [r[0] for r in rows],
+            "documents": [r[1] for r in rows],
+            "ids": [r[2] for r in rows],
+        }
+
+    def _query(**kwargs):
+        where = kwargs.get("where")
+        n = kwargs.get("n_results", len(metas))
+        rows = [(m, d) for m, d in zip(metas, docs) if _match(m, where)][:n]
+        return {
+            "documents": [[r[1] for r in rows]],
+            "metadatas": [[r[0] for r in rows]],
+            "distances": [[0.1] * len(rows)],
+            "ids": [[f"id{i}" for i in range(len(rows))]],
+        }
+
+    col.get.side_effect = _get
+    col.query.side_effect = _query
+    return col
+
+
+def _collision_metas():
+    """Two documents sharing basename 'report.pdf' in different projects.
+
+    Each document has two chunks (page 1, chunks 0 and 1).
+    """
+    a = {
+        **META,
+        "filename": "report.pdf",
+        "doc_id": "report.pdf_aaaaaaaa",
+        "source": "/projA/report.pdf",
+        "project": "projA",
+    }
+    b = {
+        **META,
+        "filename": "report.pdf",
+        "doc_id": "report.pdf_bbbbbbbb",
+        "source": "/projB/report.pdf",
+        "project": "projB",
+    }
+    metas = [
+        {**a, "page": 1, "chunk": 0},
+        {**a, "page": 1, "chunk": 1},
+        {**b, "page": 1, "chunk": 0},
+        {**b, "page": 1, "chunk": 1},
+    ]
+    docs = ["A0", "A1", "B0", "B1"]
+    return metas, docs
+
+
+def test_get_chunks_by_doc_id_isolates_document(monkeypatch):
+    import engra.commands as cmd
+    from engra.commands import _data_get_chunks
+
+    metas, docs = _collision_metas()
+    monkeypatch.setattr(cmd, "get_collection", lambda: _where_col(metas, docs))
+
+    result = _data_get_chunks("report.pdf", 1, 1, doc_id="report.pdf_aaaaaaaa")
+    texts = {c["text"] for c in result}
+    assert texts == {"A0", "A1"}  # only document A, never B
+
+
+def test_get_neighbors_by_doc_id_isolates_document(monkeypatch):
+    import engra.commands as cmd
+    from engra.commands import _data_get_neighbors
+
+    metas, docs = _collision_metas()
+    monkeypatch.setattr(cmd, "get_collection", lambda: _where_col(metas, docs))
+
+    result = _data_get_neighbors(
+        "report.pdf", page=1, chunk=0, direction="next", count=1, doc_id="report.pdf_aaaaaaaa"
+    )
+    assert len(result) == 1
+    assert result[0]["text"] == "A1"  # A's next chunk, not B's
+
+
+def test_list_members_by_doc_id_isolates_document(monkeypatch):
+    import engra.commands as cmd
+    from engra.commands import _data_list_members
+
+    metas, docs = _collision_metas()
+    monkeypatch.setattr(cmd, "get_collection", lambda: _where_col(metas, docs))
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    result = _data_list_members("report.pdf", doc_id="report.pdf_bbbbbbbb")
+    chunk_texts = {c["text"] for section in result for c in section["chunks"]}
+    assert chunk_texts == {"B0", "B1"}  # only document B
+
+
+def test_ambiguous_filename_without_doc_id_does_not_merge(monkeypatch):
+    """Calling by bare filename when it maps to two documents must raise, not merge."""
+    import engra.commands as cmd
+    from engra.commands import AmbiguousFilenameError, _data_get_chunks
+
+    metas, docs = _collision_metas()
+    monkeypatch.setattr(cmd, "get_collection", lambda: _where_col(metas, docs))
+
+    with pytest.raises(AmbiguousFilenameError) as exc_info:
+        _data_get_chunks("report.pdf", 1, 1)
+    # Both candidate doc_ids are surfaced so the caller can disambiguate
+    candidate_ids = {c["doc_id"] for c in exc_info.value.candidates}
+    assert candidate_ids == {"report.pdf_aaaaaaaa", "report.pdf_bbbbbbbb"}
+
+
+def test_list_members_ambiguous_filename_raises(monkeypatch):
+    import engra.commands as cmd
+    from engra.commands import AmbiguousFilenameError, _data_list_members
+
+    metas, docs = _collision_metas()
+    monkeypatch.setattr(cmd, "get_collection", lambda: _where_col(metas, docs))
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    with pytest.raises(AmbiguousFilenameError):
+        _data_list_members("report.pdf")
+
+
+def test_backward_compat_single_doc_without_doc_id(monkeypatch):
+    """Legacy chunks lacking a doc_id must still resolve by filename alone."""
+    import engra.commands as cmd
+    from engra.commands import _data_get_chunks
+
+    # No doc_id key at all — pre-feature index entries
+    legacy = [
+        {**META, "page": 1, "chunk": 0},
+        {**META, "page": 1, "chunk": 1},
+    ]
+    legacy = [{k: v for k, v in m.items() if k != "doc_id"} for m in legacy]
+    docs = ["L0", "L1"]
+    monkeypatch.setattr(cmd, "get_collection", lambda: _where_col(legacy, docs))
+
+    result = _data_get_chunks("doc.pdf", 1, 1)  # no doc_id passed
+    assert {c["text"] for c in result} == {"L0", "L1"}
+
+
+def test_backward_compat_missing_doc_id_not_treated_as_ambiguous(monkeypatch):
+    """Two legacy chunks (no doc_id) for the same file are one bucket, not ambiguous."""
+    from engra.commands import _resolve_doc_scope
+
+    legacy = [
+        {"filename": "doc.pdf", "source": "/tmp/doc.pdf", "page": 1, "chunk": 0},
+        {"filename": "doc.pdf", "source": "/tmp/doc.pdf", "page": 2, "chunk": 0},
+    ]
+    col = _where_col(legacy, ["a", "b"])
+    # Must not raise, and must fall back to a filename scope
+    scope = _resolve_doc_scope(col, "doc.pdf", None)
+    assert scope == {"filename": "doc.pdf"}
+
+
+def test_data_search_includes_doc_id_field(monkeypatch):
+    import engra.commands as cmd
+    from engra.commands import _data_search
+
+    col = _col([{**META, "doc_id": "doc.pdf_deadbeef"}], ["some text"])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "read_session", lambda: [])
+
+    results = _data_search("query", top_k=5)
+    assert len(results) == 1
+    assert results[0]["doc_id"] == "doc.pdf_deadbeef"
+
+
+# ── MCP schemas expose doc_id ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["engra_get_chunk", "engra_get_neighbors", "engra_list_members"],
+)
+def test_mcp_schema_accepts_doc_id(tool_name):
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    tool = next(t for t in tools if t.name == tool_name)
+    assert "doc_id" in tool.inputSchema["properties"], tool_name
+
+
+def test_mcp_get_chunk_passes_doc_id(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    captured = {}
+
+    def fake_get_chunks(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(cmd, "_data_get_chunks", fake_get_chunks)
+
+    ms = _import_mcp_server()
+    asyncio.run(
+        ms.server._call_tool_fn(
+            "engra_get_chunk",
+            {"filename": "report.pdf", "page": 1, "doc_id": "report.pdf_aaaaaaaa"},
+        )
+    )
+    assert captured.get("doc_id") == "report.pdf_aaaaaaaa"

@@ -2468,3 +2468,64 @@ def test_data_list_members_returns_breadcrumb_in_chunks(monkeypatch):
 
     result = _data_list_members("doc.html")
     assert result[0]["chunks"][0]["breadcrumb"] == "NS > Class"
+
+
+# ── store_file / remove_file doc_id-scoped storage ──────────────────────────────
+
+
+def test_store_file_same_basename_different_projects_no_overwrite(tmp_path, monkeypatch):
+    """Two files sharing a basename in different projects must not overwrite on disk."""
+    from engra import storage
+    from engra.commands import doc_id_prefix
+
+    files_dir = tmp_path / "files"
+    monkeypatch.setattr(storage, "FILES_DIR", files_dir)
+    monkeypatch.setattr(storage, "DB_DIR", tmp_path / "db")
+
+    proj_a = tmp_path / "projA"
+    proj_b = tmp_path / "projB"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    a = proj_a / "report.pdf"
+    b = proj_b / "report.pdf"
+    a.write_bytes(b"AAA")
+    b.write_bytes(b"BBB")
+
+    id_a = doc_id_prefix(a)
+    id_b = doc_id_prefix(b)
+    assert id_a != id_b  # unique per resolved source path
+
+    dest_a = storage.store_file(a, id_a)
+    dest_b = storage.store_file(b, id_b)
+
+    # Both stored copies coexist with their own content
+    assert dest_a != dest_b
+    assert dest_a.read_bytes() == b"AAA"
+    assert dest_b.read_bytes() == b"BBB"
+
+
+def test_remove_file_independently_removable(tmp_path, monkeypatch):
+    from engra import storage
+    from engra.commands import doc_id_prefix
+
+    files_dir = tmp_path / "files"
+    monkeypatch.setattr(storage, "FILES_DIR", files_dir)
+    monkeypatch.setattr(storage, "DB_DIR", tmp_path / "db")
+
+    proj_a = tmp_path / "projA"
+    proj_b = tmp_path / "projB"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    a = proj_a / "report.pdf"
+    b = proj_b / "report.pdf"
+    a.write_bytes(b"AAA")
+    b.write_bytes(b"BBB")
+
+    id_a = doc_id_prefix(a)
+    id_b = doc_id_prefix(b)
+    dest_a = storage.store_file(a, id_a)
+    dest_b = storage.store_file(b, id_b)
+
+    storage.remove_file(id_a, a.suffix)
+    assert not dest_a.exists()
+    assert dest_b.read_bytes() == b"BBB"  # the other copy is untouched

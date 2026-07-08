@@ -225,6 +225,14 @@ engra get report.pdf 42 --prev      # one chunk before
 engra get report.pdf 5-10           # all chunks across a page range
 ```
 
+If the same filename was indexed in more than one project, `engra get` reports the
+ambiguity and lists the candidate document ids. Pass `--doc-id` (the `doc_id` shown in
+`engra search --format json` results) to select one:
+
+```bash
+engra get report.pdf 42 --doc-id report.pdf_a1b2c3d4
+```
+
 ## Bookmarks
 
 Save and re-run named searches:
@@ -312,7 +320,12 @@ Alternatively, add the snippet above manually to `.claude/settings.json` (or run
 engra list                                    # show all indexed files with project, chunks, path
 engra remove report.pdf                       # remove by filename (if unambiguous)
 engra remove ./docs/report.pdf                # remove by full path
+engra remove report.pdf --doc-id report.pdf_a1b2c3d4   # remove a specific document by doc_id
 ```
+
+When two documents share a basename across projects, `engra remove report.pdf` lists the
+candidates (with their `doc_id` and full path) so you can disambiguate by full path or
+`--doc-id`.
 
 ## Data locations
 
