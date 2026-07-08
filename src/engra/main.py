@@ -136,6 +136,15 @@ def run() -> None:
         action="store_true",
         help="Surface chunks from files linked by the top results (HTML only)",
     )
+    p_search.add_argument(
+        "--mode",
+        choices=["dense", "keyword", "hybrid"],
+        default="hybrid",
+        help=(
+            "Retrieval mode: 'dense' (vector only), 'keyword' (BM25 exact tokens), "
+            "or 'hybrid' fusion of both (default)"
+        ),
+    )
 
     # get
     p_get = sub.add_parser("get", help="Retrieve full chunk text by file and page")
@@ -368,6 +377,7 @@ def run() -> None:
             output_format=args.output_format,
             rerank=args.rerank,
             follow_links=args.links,
+            mode=args.mode,
         )
     elif args.cmd == "get":
         try:
