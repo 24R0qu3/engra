@@ -39,6 +39,9 @@ DEFAULTS: dict = {
         "threads": 0,  # 0 = use os.cpu_count()
         "provider": "cpu",
     },
+    "mcp": {
+        "index_allowlist": [],  # empty = default-allow the user home directory
+    },
 }
 
 _DEFAULT_TOML = """\

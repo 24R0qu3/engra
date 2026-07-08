@@ -471,15 +471,28 @@ def _import_mcp_server():
             self.text = text
 
     class Tool:
-        def __init__(self, name, description="", inputSchema=None):
+        def __init__(self, name, description="", inputSchema=None, annotations=None):
             self.name = name
             self.description = description
             self.inputSchema = inputSchema or {}
+            self.annotations = annotations
+
+    class ToolAnnotations:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class CallToolResult:
+        def __init__(self, content, isError=False):
+            self.content = content
+            self.isError = isError
 
     server_stub.Server = FakeServer
     stdio_stub.stdio_server = None
     types_stub.TextContent = TextContent
     types_stub.Tool = Tool
+    types_stub.ToolAnnotations = ToolAnnotations
+    types_stub.CallToolResult = CallToolResult
     mcp_stub.server = server_stub
     mcp_stub.types = types_stub
 
@@ -518,6 +531,37 @@ def test_mcp_list_tools_returns_all_twelve():
     assert names == expected
 
 
+def test_mcp_search_schema_exposes_follow_links():
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    search_tool = next(t for t in tools if t.name == "engra_search")
+    assert "follow_links" in search_tool.inputSchema["properties"]
+    assert search_tool.inputSchema["properties"]["follow_links"]["default"] is False
+
+
+def test_mcp_read_only_tools_carry_read_only_hint():
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    read_only = {
+        "engra_search",
+        "engra_get_chunk",
+        "engra_get_neighbors",
+        "engra_list_projects",
+        "engra_list_files",
+        "engra_list_members",
+        "engra_info",
+    }
+    for tool in tools:
+        if tool.name in read_only:
+            assert tool.annotations.readOnlyHint is True, tool.name
+        else:
+            assert tool.annotations.readOnlyHint is False, tool.name
+
+
 def test_mcp_call_tool_search_round_trips(monkeypatch):
     import asyncio
 
@@ -540,10 +584,12 @@ def test_mcp_call_tool_unknown_returns_error():
     import asyncio
 
     ms = _import_mcp_server()
-    results = asyncio.run(ms.server._call_tool_fn("not_a_tool", {}))
-    data = json.loads(results[0].text)
+    result = asyncio.run(ms.server._call_tool_fn("not_a_tool", {}))
+    assert result.isError is True
+    data = json.loads(result.content[0].text)
     assert "error" in data
     assert "not_a_tool" in data["error"]
+    assert data["tool"] == "not_a_tool"
 
 
 def test_mcp_call_tool_exception_returns_error(monkeypatch):
@@ -556,10 +602,12 @@ def test_mcp_call_tool_exception_returns_error(monkeypatch):
     )
 
     ms = _import_mcp_server()
-    results = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
-    data = json.loads(results[0].text)
+    result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    assert result.isError is True
+    data = json.loads(result.content[0].text)
     assert "error" in data
     assert "db down" in data["error"]
+    assert data["tool"] == "engra_search"
 
 
 def test_mcp_list_files_dispatch(monkeypatch):
@@ -703,3 +751,99 @@ def test_mcp_list_members_passes_section_filter(monkeypatch):
     )
     assert captured.get("section_filter") == "My"
     assert captured.get("filename") == "doc.pdf"
+
+
+# ── engra_search follow_links wiring ──────────────────────────────────────────
+
+
+def test_mcp_search_passes_follow_links(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    captured = {}
+
+    def fake_search(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    col = _col([META])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q", "follow_links": True}))
+    assert captured.get("follow_links") is True
+
+
+def test_mcp_search_follow_links_defaults_false(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    captured = {}
+
+    def fake_search(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    col = _col([META])
+    monkeypatch.setattr(cmd, "get_collection", lambda: col)
+    monkeypatch.setattr(cmd, "load_model", _model)
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    assert captured.get("follow_links") is False
+
+
+# ── engra_index path allowlist ────────────────────────────────────────────────
+
+
+def test_index_path_inside_allowlist_accepted(tmp_path):
+    ms = _import_mcp_server()
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    inside = root / "sub" / "file.txt"
+    inside.parent.mkdir()
+    inside.write_text("x")
+
+    assert ms._is_path_allowed(inside, [root.resolve()]) is True
+
+
+def test_index_path_outside_allowlist_rejected(tmp_path):
+    ms = _import_mcp_server()
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "outside" / "file.txt"
+    outside.parent.mkdir()
+    outside.write_text("x")
+
+    assert ms._is_path_allowed(outside, [root.resolve()]) is False
+
+
+def test_index_path_traversal_rejected(tmp_path):
+    ms = _import_mcp_server()
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    (tmp_path / "outside").mkdir()
+    traversal = root / ".." / "outside" / "file.txt"
+
+    assert ms._is_path_allowed(traversal, [root.resolve()]) is False
+
+
+def test_validate_index_paths_raises_for_disallowed(tmp_path, monkeypatch):
+    ms = _import_mcp_server()
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    monkeypatch.setattr(ms, "_index_allowlist_roots", lambda: [root.resolve()])
+
+    with pytest.raises(ValueError, match="allowlist"):
+        ms._validate_index_paths([tmp_path / "outside.txt"])
+
+    ms._validate_index_paths([root / "ok.txt"])  # does not raise
