@@ -56,11 +56,25 @@ _tokenizer = None
 
 
 def _get_tokenizer():
+    """Load the tokenizer fastembed already cached for MODEL_NAME under CACHE_DIR.
+
+    Reuses the tokenizer.json fastembed downloaded alongside the ONNX model
+    (load_model() always runs first, so it's on disk by the time chunking needs
+    it) instead of fetching a second copy from the Hub: Tokenizer.from_pretrained
+    has no cache_dir override, so it would otherwise write outside CACHE_DIR and
+    could resolve a different backing repo than the one fastembed actually loads
+    for MODEL_NAME (e.g. a vendor ONNX mirror), producing token counts that don't
+    match what the model actually sees.
+    """
     global _tokenizer
     if _tokenizer is None:
         from tokenizers import Tokenizer  # noqa: PLC0415 – lazy import mirrors load_model()
 
-        _tokenizer = Tokenizer.from_pretrained(MODEL_NAME)
+        cached = next((CACHE_DIR / "models").rglob("tokenizer.json"), None)
+        if cached is not None:
+            _tokenizer = Tokenizer.from_file(str(cached))
+        else:
+            _tokenizer = Tokenizer.from_pretrained(MODEL_NAME)
     return _tokenizer
 
 
