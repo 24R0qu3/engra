@@ -43,6 +43,7 @@ DEFAULTS: dict = {
         "batch_size": 64,
         "threads": 0,  # 0 = use os.cpu_count()
         "provider": "cpu",
+        "max_tokens": 450,  # target chunk size in tokens (model truncates at 512)
     },
     "mcp": {
         "index_allowlist": [],  # empty = default-allow the user home directory
@@ -81,9 +82,11 @@ api_key = "ollama"
 # batch_size: number of chunks per embedding batch (default 64)
 # threads: ONNX inference threads, 0 = auto (os.cpu_count())
 # provider: "cpu" | "cuda" | "rocm" | "directml"
+# max_tokens: target chunk size in tokens (the model truncates input at 512 tokens)
 batch_size = 64
 threads = 0
 provider = "cpu"
+max_tokens = 450
 """
 
 

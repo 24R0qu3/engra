@@ -47,9 +47,43 @@ console = Console()
 
 MODEL_NAME = "intfloat/multilingual-e5-large"
 MIN_CHARS = 80
-CHUNK_SIZE = 2000
-CHUNK_OVERLAP = 200
+CHUNK_SIZE = 450  # target chunk size in tokens, leaving headroom under MODEL_TOKEN_LIMIT
+CHUNK_OVERLAP = 45  # token overlap between consecutive chunks
+MODEL_TOKEN_LIMIT = 512  # hard truncation limit of MODEL_NAME
 DEFAULT_MIN_SCORE = 0.3  # MCP engra_search default; below this is treated as "not found"
+
+_tokenizer = None
+
+
+def _get_tokenizer():
+    global _tokenizer
+    if _tokenizer is None:
+        from tokenizers import Tokenizer  # noqa: PLC0415 – lazy import mirrors load_model()
+
+        _tokenizer = Tokenizer.from_pretrained(MODEL_NAME)
+    return _tokenizer
+
+
+def _count_tokens(text: str) -> int:
+    """Count tokens using MODEL_NAME's real tokenizer (same one fastembed feeds the model)."""
+    return len(_get_tokenizer().encode(text, add_special_tokens=False).ids)
+
+
+def _token_boundary(text: str, max_tokens: int) -> int:
+    """Return a char index such that text[:idx] contains at most max_tokens tokens."""
+    encoding = _get_tokenizer().encode(text, add_special_tokens=False)
+    if len(encoding.ids) <= max_tokens:
+        return len(text)
+    return encoding.offsets[max_tokens][0]
+
+
+def _token_tail(text: str, n_tokens: int) -> str:
+    """Return the suffix of text made up of its last n_tokens tokens."""
+    encoding = _get_tokenizer().encode(text, add_special_tokens=False)
+    if len(encoding.ids) <= n_tokens:
+        return text
+    return text[encoding.offsets[-n_tokens][0] :]
+
 
 _NOTABLE_PATTERN = re.compile(
     r"\b(TBD|TODO|FIXME|stub)\b|not\s+implemented|raise\s+NotImplementedError",
@@ -300,32 +334,35 @@ def doc_id_prefix(pdf_path: Path) -> str:
 
 
 def chunk_text(text: str) -> list[str]:
-    """Split text at paragraph/sentence boundaries up to CHUNK_SIZE chars with overlap."""
-    if len(text) <= CHUNK_SIZE:
+    """Split text at paragraph/sentence boundaries up to a token budget, with overlap."""
+    max_tokens = load_config().get("embedding", {}).get("max_tokens", CHUNK_SIZE)
+    overlap = max(1, round(max_tokens * CHUNK_OVERLAP / CHUNK_SIZE))
+    if _count_tokens(text) <= max_tokens:
         return [text]
     paragraphs = re.split(r"\n{2,}", text)
     raw: list[str] = []
     current = ""
     for para in paragraphs:
-        if len(current) + len(para) + 2 <= CHUNK_SIZE:
+        if _count_tokens(current + "\n\n" + para) <= max_tokens:
             current = (current + "\n\n" + para).lstrip()
         else:
             if current:
                 raw.append(current)
-            if len(para) <= CHUNK_SIZE:
+            if _count_tokens(para) <= max_tokens:
                 current = para
             else:
                 sentences = re.split(r"(?<=[.!?])\s+", para)
                 current = ""
                 for sent in sentences:
-                    if len(current) + len(sent) + 1 <= CHUNK_SIZE:
+                    if _count_tokens(current + " " + sent) <= max_tokens:
                         current = (current + " " + sent).lstrip()
                     else:
                         if current:
                             raw.append(current)
-                        while len(sent) > CHUNK_SIZE:
-                            sp = sent.rfind(" ", 0, CHUNK_SIZE)
-                            sp = sp if sp > 0 else CHUNK_SIZE
+                        while _count_tokens(sent) > max_tokens:
+                            idx = _token_boundary(sent, max_tokens)
+                            sp = sent.rfind(" ", 0, idx)
+                            sp = sp if sp > 0 else idx
                             raw.append(sent[:sp])
                             sent = sent[sp:].lstrip()
                         current = sent
@@ -336,7 +373,7 @@ def chunk_text(text: str) -> list[str]:
     # Apply overlap: prefix each chunk (after the first) with the tail of the previous chunk
     result = [raw[0]]
     for i in range(1, len(raw)):
-        tail = result[-1][-CHUNK_OVERLAP:]
+        tail = _token_tail(result[-1], overlap)
         result.append(tail + raw[i])
     return result
 
@@ -520,6 +557,15 @@ def _prepare_chunks(
         raw_chunks = [section.text] if section.atomic else chunk_text(section.text)
         for chunk_idx, chunk in enumerate(raw_chunks):
             doc_text = f"{section.breadcrumb}\n{chunk}" if section.breadcrumb else chunk
+            if _count_tokens(doc_text) > MODEL_TOKEN_LIMIT:
+                logger.warning(
+                    "%s chunk %d exceeds the %d-token embedding limit (%d tokens); "
+                    "the tail will be silently truncated by the model.",
+                    file_path.name,
+                    chunk_idx,
+                    MODEL_TOKEN_LIMIT,
+                    _count_tokens(doc_text),
+                )
             chunk_texts.append(doc_text)
             chunk_metas.append(
                 {
