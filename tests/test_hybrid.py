@@ -11,7 +11,6 @@ from engra.commands import (
     _where_to_fts_sql,
 )
 
-
 # ── Reciprocal Rank Fusion (pure, no index) ─────────────────────────────────────
 
 

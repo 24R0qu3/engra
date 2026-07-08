@@ -21,7 +21,6 @@ def _isolate_fts(monkeypatch, tmp_path_factory):
 
     db = tmp_path_factory.mktemp("fts") / "fts.db"
     monkeypatch.setattr(storage, "FTS_DB_PATH", db)
-    monkeypatch.setattr(storage, "ensure_dirs", lambda: db.parent.mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr(storage, "_fts_available", None)
     monkeypatch.setattr(storage, "_fts_warned", False)
     yield

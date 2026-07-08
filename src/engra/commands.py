@@ -466,9 +466,7 @@ def _where_to_fts_sql(where: dict | None) -> str | None:
     return _clause(where) or None
 
 
-def _reciprocal_rank_fusion(
-    ranked_lists: list[list[str]], k: int = 60
-) -> list[tuple[str, float]]:
+def _reciprocal_rank_fusion(ranked_lists: list[list[str]], k: int = 60) -> list[tuple[str, float]]:
     """Fuse several ranked id lists via Reciprocal Rank Fusion.
 
     Each list is chunk ids in best-first order. An id's fused score is

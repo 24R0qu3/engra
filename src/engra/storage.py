@@ -168,7 +168,7 @@ def get_fts_connection() -> sqlite3.Connection | None:
     global _fts_available, _fts_warned
     if _fts_available is False:
         return None
-    ensure_dirs()
+    FTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         conn = sqlite3.connect(str(FTS_DB_PATH))
         conn.execute(_FTS_CREATE)
@@ -201,8 +201,7 @@ def fts_add(rows: list[tuple]) -> None:
         return
     try:
         conn.executemany(
-            "INSERT INTO chunks (chunk_id, text, doc_id, project, filename) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO chunks (chunk_id, text, doc_id, project, filename) VALUES (?, ?, ?, ?, ?)",
             rows,
         )
         conn.commit()

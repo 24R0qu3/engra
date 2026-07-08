@@ -935,7 +935,13 @@ def _make_ask_collection(docs, metas):
     col = MagicMock()
     col.count.return_value = len(docs)
     distances = [0.1] * len(docs)
-    col.query.return_value = {"documents": [docs], "metadatas": [metas], "distances": [distances]}
+    ids = [f"id{i}" for i in range(len(docs))]
+    col.query.return_value = {
+        "documents": [docs],
+        "metadatas": [metas],
+        "distances": [distances],
+        "ids": [ids],
+    }
     return col
 
 
