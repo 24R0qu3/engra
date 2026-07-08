@@ -13,6 +13,7 @@ Then register in your MCP client config:
 import json
 import logging
 import sys
+from pathlib import Path
 
 try:
     from mcp import types as mcp_types
@@ -39,10 +40,22 @@ from engra.commands import (
     _data_search,
 )
 from engra.config import init as init_config
+from engra.config import load as load_config
 
 logger = logging.getLogger(__name__)
 
 server = Server("engra")
+
+
+def _annotations(**kwargs) -> "mcp_types.ToolAnnotations | None":
+    """Build ToolAnnotations if the installed mcp package supports them.
+
+    Older 1.x releases within the pinned mcp>=1.0,<2.0 range may predate
+    ToolAnnotations, so this degrades to None rather than raising.
+    """
+    if not hasattr(mcp_types, "ToolAnnotations"):
+        return None
+    return mcp_types.ToolAnnotations(**kwargs)
 
 
 # ── Tool manifest ─────────────────────────────────────────────────────────────
@@ -58,6 +71,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "Returns ranked chunks with filename, page, score, and text. "
                 "projects=null uses the active session; pass [] to search globally."
             ),
+            annotations=_annotations(readOnlyHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -82,6 +96,14 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "default": None,
                         "description": "Restrict to one file",
                     },
+                    "follow_links": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Also append the best chunk from files linked by top results "
+                            "(links_to/linked_from/cross_references)"
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -92,6 +114,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "Retrieve full text of all chunks on a page (or a specific chunk). "
                 "Use after search to read beyond the snippet."
             ),
+            annotations=_annotations(readOnlyHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -118,6 +141,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "Use to expand context around a search hit. "
                 "direction: 'next' | 'prev' | 'both'."
             ),
+            annotations=_annotations(readOnlyHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -145,11 +169,13 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "descriptions, and keywords. Call this first to identify which "
                 "project to search in."
             ),
+            annotations=_annotations(readOnlyHint=True),
             inputSchema={"type": "object", "properties": {}},
         ),
         mcp_types.Tool(
             name="engra_list_files",
             description="List all indexed files with chunk counts and staleness status.",
+            annotations=_annotations(readOnlyHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -169,6 +195,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "(e.g. 'does class X have a callback for Y?') without a similarity query. "
                 "projects=null uses the active session; pass [] to search globally."
             ),
+            annotations=_annotations(readOnlyHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -199,6 +226,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "Returns indexed file count, total chunks, and skipped files with reasons. "
                 "Automatically generates description and keywords via the configured AI backend."
             ),
+            annotations=_annotations(readOnlyHint=False),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -230,6 +258,7 @@ async def list_tools() -> list[mcp_types.Tool]:
         mcp_types.Tool(
             name="engra_project_describe",
             description="Set the user-provided description and/or keywords for a project.",
+            annotations=_annotations(readOnlyHint=False, idempotentHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -256,6 +285,7 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "using the configured backend (Ollama or Claude). "
                 "Use this to describe projects that were indexed before auto-description was added."
             ),
+            annotations=_annotations(readOnlyHint=False, idempotentHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -267,11 +297,13 @@ async def list_tools() -> list[mcp_types.Tool]:
         mcp_types.Tool(
             name="engra_info",
             description="Return global index statistics: chunk count, file count, model, etc.",
+            annotations=_annotations(readOnlyHint=True),
             inputSchema={"type": "object", "properties": {}},
         ),
         mcp_types.Tool(
             name="engra_project_activate",
             description="Activate one or more projects for the current session (8-hour TTL).",
+            annotations=_annotations(readOnlyHint=False, idempotentHint=True),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -283,6 +315,7 @@ async def list_tools() -> list[mcp_types.Tool]:
         mcp_types.Tool(
             name="engra_project_deactivate",
             description="Clear the active project session; subsequent searches are global.",
+            annotations=_annotations(readOnlyHint=False, idempotentHint=True),
             inputSchema={"type": "object", "properties": {}},
         ),
     ]
@@ -292,18 +325,41 @@ async def list_tools() -> list[mcp_types.Tool]:
 
 
 @server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[mcp_types.TextContent]:
+async def call_tool(
+    name: str, arguments: dict
+) -> list[mcp_types.TextContent] | mcp_types.CallToolResult:
     try:
         result = _dispatch(name, arguments)
         return [mcp_types.TextContent(type="text", text=json.dumps(result, default=str))]
     except Exception as exc:
         logger.exception("Tool %s failed", name)
-        return [mcp_types.TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+        payload = json.dumps({"error": str(exc), "tool": name})
+        return mcp_types.CallToolResult(
+            content=[mcp_types.TextContent(type="text", text=payload)],
+            isError=True,
+        )
+
+
+def _index_allowlist_roots() -> list[Path]:
+    allowlist = load_config().get("mcp", {}).get("index_allowlist") or []
+    if not allowlist:
+        return [Path.home().resolve()]
+    return [Path(root).expanduser().resolve() for root in allowlist]
+
+
+def _is_path_allowed(path: Path, roots: list[Path]) -> bool:
+    resolved = path.resolve()
+    return any(resolved == root or root in resolved.parents for root in roots)
+
+
+def _validate_index_paths(paths: list[Path]) -> None:
+    roots = _index_allowlist_roots()
+    for p in paths:
+        if not _is_path_allowed(p, roots):
+            raise ValueError(f"Path not permitted by MCP index allowlist: {p}")
 
 
 def _dispatch(name: str, args: dict):
-    from pathlib import Path
-
     if name == "engra_search":
         return _data_search(
             query=args["query"],
@@ -311,6 +367,7 @@ def _dispatch(name: str, args: dict):
             min_score=args.get("min_score", DEFAULT_MIN_SCORE),
             filename=args.get("filename"),
             projects=args.get("projects"),
+            follow_links=args.get("follow_links", False),
         )
     elif name == "engra_get_chunk":
         page = args["page"]
@@ -339,8 +396,10 @@ def _dispatch(name: str, args: dict):
     elif name == "engra_list_files":
         return _data_list_files(project=args.get("project"))
     elif name == "engra_index":
+        index_paths = [Path(p) for p in args["paths"]]
+        _validate_index_paths(index_paths)
         return _data_index(
-            paths=[Path(p) for p in args["paths"]],
+            paths=index_paths,
             force=args.get("force", False),
             project=args.get("project"),
             description=args.get("description"),
