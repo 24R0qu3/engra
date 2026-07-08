@@ -395,3 +395,5 @@ git push --follow-tags       # triggers release workflow
 - **test.yaml** — ruff + pytest on every push/PR to `main`
 - **release.yaml** — builds standalone binaries for Linux and macOS on version tag push
 - **Dependabot** — weekly pip and GitHub Actions dependency updates
+
+<!-- kiosc pipeline canary: verified -->
