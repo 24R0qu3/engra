@@ -331,7 +331,15 @@ def load_model():
             "directml": "DmlExecutionProvider",
         }
         ort_provider = provider_map.get(provider, f"{provider}ExecutionProvider")
-        kwargs["providers"] = [ort_provider, "CPUExecutionProvider"]
+        # Pass device_id explicitly for CUDA so ORT skips DRM device enumeration
+        # (DRM discovery can fail on systems with virtual/headless DRM nodes, leaving
+        # device_id=-1 and causing cudaSetDevice to fail with error 999).
+        if ort_provider == "CUDAExecutionProvider":
+            device_id = int(cfg.get("device_id", 0))
+            ort_provider_entry: object = ("CUDAExecutionProvider", {"device_id": device_id})
+        else:
+            ort_provider_entry = ort_provider
+        kwargs["providers"] = [ort_provider_entry, "CPUExecutionProvider"]
         try:
             return TextEmbedding(MODEL_NAME, **kwargs)
         except Exception:
@@ -2912,24 +2920,97 @@ _ORT_GPU_INDEX = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packagin
 
 
 def cmd_setup_gpu() -> None:
-    """Install the correct onnxruntime-gpu wheel for CUDA 12 GPU inference.
+    """Full post-install setup: MCP server, AI backend, and GPU inference.
 
-    fastembed-gpu pulls in the lightweight add-on onnxruntime-gpu from PyPI, which
-    only provides CUDA provider .so files. This command replaces it with the full
-    standalone GPU wheel (252 MB) that includes Python bindings + CUDA support.
+    Installs the 'mcp' and 'anthropic' packages if missing, then replaces the
+    lightweight onnxruntime-gpu add-on with the full CUDA 12 standalone wheel.
 
-    Run once after every: pipx install "engra[gpu]" --force
+    Run once after every: pipx install "engra[full,gpu]" --force
     """
+    import importlib
     import subprocess
 
-    try:
-        import onnxruntime as ort
+    # ── optional packages ──────────────────────────────────────────────────────
+    _OPTIONAL = [
+        ("mcp", "mcp>=1.0,<2.0", "MCP server"),
+        ("anthropic", "anthropic>=0.40.0", "AI auto-description"),
+    ]
+    for module, spec, label in _OPTIONAL:
+        try:
+            importlib.import_module(module)
+            console.print(f"[green]{label} already installed[/green] — skipping.")
+        except ImportError:
+            console.print(f"Installing {label} ({spec})…")
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", spec],
+                check=False,
+            )
+            if result.returncode != 0:
+                console.print(f"[red]{label} installation failed.[/red]")
+                raise SystemExit(1)
+            console.print(f"[green]{label} installed.[/green]")
 
-        if "CUDAExecutionProvider" in ort.get_available_providers():
-            console.print("[green]CUDA already available[/green] — nothing to do.")
-            return
-    except Exception:
-        pass
+    # ── onnxruntime-gpu ────────────────────────────────────────────────────────
+    # Two independent checks are needed:
+    #   1. Is the GPU wheel installed?  → look for the CUDA provider .so on disk.
+    #      get_available_providers() is NOT reliable here: newer ORT omits
+    #      CUDAExecutionProvider entirely when cuDNN is absent, so that check
+    #      would always fall through to a pointless reinstall.
+    #   2. Is cuDNN loadable?  → ctypes probe.  Reinstalling ORT won't fix a
+    #      missing cuDNN, so we short-circuit with a clear error message.
+    import ctypes
+
+    def _cuda_provider_so_present() -> bool:
+        try:
+            import onnxruntime as _ort
+
+            capi_dir = Path(_ort.__file__).parent / "capi"
+            return bool(list(capi_dir.glob("libonnxruntime_providers_cuda*.so*")))
+        except Exception:
+            return False
+
+    def _cudnn_available() -> bool:
+        for name in ("libcudnn.so.9", "libcudnn.so"):
+            try:
+                ctypes.CDLL(name)
+                return True
+            except OSError:
+                pass
+        return False
+
+    # If the CPU-only 'onnxruntime' is installed alongside 'onnxruntime-gpu',
+    # its libonnxruntime.so overwrites the GPU core, causing Provider_GetHost
+    # to be an undefined symbol in the CUDA provider SO.  Remove it first.
+    try:
+        import importlib.metadata as _meta
+
+        _meta.distribution("onnxruntime")  # CPU-only package present
+        console.print(
+            "Removing CPU-only [bold]onnxruntime[/bold] (conflicts with onnxruntime-gpu)…"
+        )
+        subprocess.run(
+            [sys.executable, "-m", "pip", "uninstall", "onnxruntime", "-y"],
+            check=True,
+        )
+        console.print("[green]Removed.[/green]")
+    except importlib.metadata.PackageNotFoundError:
+        pass  # not installed, nothing to do
+
+    gpu_wheel_present = _cuda_provider_so_present()
+    cudnn_present = _cudnn_available()
+
+    if gpu_wheel_present and cudnn_present:
+        console.print("[green]CUDA + cuDNN already available[/green] — nothing to do.")
+        return
+
+    if gpu_wheel_present and not cudnn_present:
+        console.print(
+            "[yellow]onnxruntime-gpu is installed but cuDNN 9 is missing.[/yellow]\n"
+            "Reinstalling onnxruntime-gpu will not fix this. Install cuDNN first:\n"
+            "  [bold]sudo apt install libcudnn9-cuda-12[/bold]\n"
+            "Then re-run [bold]engra setup-gpu[/bold]."
+        )
+        raise SystemExit(1)
 
     console.print("Installing full onnxruntime-gpu wheel for CUDA 12…")
     result = subprocess.run(
@@ -2949,9 +3030,6 @@ def cmd_setup_gpu() -> None:
     if result.returncode != 0:
         console.print("[red]Installation failed.[/red] Check the output above.")
         raise SystemExit(1)
-
-    # Verify
-    import importlib
 
     import onnxruntime as ort  # noqa: PLC0415
 

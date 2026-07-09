@@ -44,6 +44,7 @@ DEFAULTS: dict = {
         "batch_size": 64,
         "threads": 0,  # 0 = use os.cpu_count()
         "provider": "cpu",
+        "device_id": 0,
         "max_tokens": 450,  # target chunk size in tokens (model truncates at 512)
     },
     "mcp": {
@@ -85,11 +86,17 @@ api_key = "ollama"
 # batch_size: number of chunks per embedding batch (default 64)
 # threads: ONNX inference threads, 0 = auto (os.cpu_count())
 # provider: "cpu" | "cuda" | "rocm" | "directml"
+# device_id: GPU device index (default 0); increase for multi-GPU systems
 # max_tokens: target chunk size in tokens (the model truncates input at 512 tokens)
 batch_size = 64
 threads = 0
 provider = "cpu"
+device_id = 0
 max_tokens = 450
+
+[mcp]
+# index_allowlist: paths engra_index (MCP tool) may index; empty = user home directory
+index_allowlist = []
 """
 
 
