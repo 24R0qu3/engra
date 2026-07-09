@@ -623,7 +623,10 @@ def test_mcp_list_files_dispatch(monkeypatch):
     ms = _import_mcp_server()
     results = asyncio.run(ms.server._call_tool_fn("engra_list_files", {}))
     data = json.loads(results[0].text)
-    assert isinstance(data, list)
+    assert isinstance(data["items"], list)
+    assert data["total"] == len(data["items"])
+    assert data["offset"] == 0
+    assert data["limit"] == 50
 
 
 def test_mcp_info_dispatch(monkeypatch):
@@ -797,7 +800,8 @@ def test_mcp_list_members_dispatch(monkeypatch):
     ms = _import_mcp_server()
     results = asyncio.run(ms.server._call_tool_fn("engra_list_members", {"filename": "doc.pdf"}))
     data = json.loads(results[0].text)
-    assert isinstance(data, list)
+    assert isinstance(data["items"], list)
+    assert data["total"] == len(data["items"])
 
 
 def test_mcp_list_members_passes_section_filter(monkeypatch):
@@ -1207,3 +1211,178 @@ def test_mcp_get_chunk_passes_doc_id(monkeypatch):
         )
     )
     assert captured.get("doc_id") == "report.pdf_aaaaaaaa"
+
+
+# ── engra_search lean result payload ──────────────────────────────────────────
+
+
+def _full_hit(**overrides):
+    hit = {
+        "filename": "doc.pdf",
+        "doc_id": "doc.pdf_deadbeef",
+        "page": 1,
+        "page_label": "1",
+        "total_pages": 3,
+        "chunk": 0,
+        "score": 0.9,
+        "text": "hello world",
+        "project": "proj",
+        "source": "/tmp/doc.pdf",
+        "indexed_at": "2026-01-01T00:00:00+00:00",
+        "source_mtime": 1234567890.0,
+        "notable": False,
+        "links_to": "",
+        "linked_from": [],
+        "breadcrumb": "NS > MyClass",
+        "cross_references": [],
+        "retrieval": "dense",
+        "confidence": 1.0,
+    }
+    hit.update(overrides)
+    return hit
+
+
+def test_mcp_search_result_is_lean(monkeypatch):
+    """Search results are pruned to fields an agent needs to read/cite/navigate."""
+    import asyncio
+
+    import engra.commands as cmd
+
+    monkeypatch.setattr(cmd, "_data_search", lambda **kwargs: [_full_hit()])
+
+    ms = _import_mcp_server()
+    result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    data = json.loads(result[0].text)
+    hit = data["results"][0]
+
+    keep = {
+        "filename",
+        "doc_id",
+        "page",
+        "page_label",
+        "chunk",
+        "text",
+        "project",
+        "score",
+        "confidence",
+        "retrieval",
+        "breadcrumb",
+        "links_to",
+        "cross_references",
+        "notable",
+    }
+    drop = {"source", "total_pages", "indexed_at", "source_mtime", "linked_from"}
+
+    for field in keep:
+        assert field in hit, field
+    for field in drop:
+        assert field not in hit, field
+
+
+def test_mcp_search_result_lean_in_not_found_envelope(monkeypatch):
+    """Low-confidence results are also pruned before being returned."""
+    import asyncio
+
+    import engra.commands as cmd
+    from engra.commands import DEFAULT_MIN_SCORE
+
+    low = round(DEFAULT_MIN_SCORE - 0.05, 4)
+    monkeypatch.setattr(cmd, "_data_search", lambda **kwargs: [_full_hit(confidence=low)])
+
+    ms = _import_mcp_server()
+    result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    data = json.loads(result[0].text)
+    assert data["not_found"] is True
+    assert "source" not in data["results"][0]
+
+
+# ── engra_list_files / engra_list_members pagination ─────────────────────────
+
+
+def test_mcp_list_files_pagination(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    items = [{"filename": f"f{i}.pdf"} for i in range(5)]
+    monkeypatch.setattr(cmd, "_data_list_files", lambda **kwargs: items)
+
+    ms = _import_mcp_server()
+    result = asyncio.run(
+        ms.server._call_tool_fn("engra_list_files", {"offset": 1, "limit": 2})
+    )
+    data = json.loads(result[0].text)
+    assert data["items"] == items[1:3]
+    assert data["total"] == 5
+    assert data["offset"] == 1
+    assert data["limit"] == 2
+
+
+def test_mcp_list_members_pagination(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    items = [{"section": f"s{i}"} for i in range(5)]
+    monkeypatch.setattr(cmd, "_data_list_members", lambda **kwargs: items)
+
+    ms = _import_mcp_server()
+    result = asyncio.run(
+        ms.server._call_tool_fn(
+            "engra_list_members",
+            {"filename": "doc.pdf", "offset": 1, "limit": 2},
+        )
+    )
+    data = json.loads(result[0].text)
+    assert data["items"] == items[1:3]
+    assert data["total"] == 5
+    assert data["offset"] == 1
+    assert data["limit"] == 2
+
+
+def test_mcp_list_files_invalid_offset_errors(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    monkeypatch.setattr(cmd, "_data_list_files", lambda **kwargs: [])
+
+    ms = _import_mcp_server()
+    result = asyncio.run(
+        ms.server._call_tool_fn("engra_list_files", {"offset": -1})
+    )
+    assert result.isError is True
+
+
+def test_mcp_list_files_invalid_limit_errors(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    monkeypatch.setattr(cmd, "_data_list_files", lambda **kwargs: [])
+
+    ms = _import_mcp_server()
+    result = asyncio.run(
+        ms.server._call_tool_fn("engra_list_files", {"limit": 0})
+    )
+    assert result.isError is True
+
+
+def test_mcp_list_files_schema_exposes_pagination():
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    tool = next(t for t in tools if t.name == "engra_list_files")
+    assert tool.inputSchema["properties"]["offset"]["default"] == 0
+    assert tool.inputSchema["properties"]["limit"]["default"] == 50
+
+
+def test_mcp_list_members_schema_exposes_pagination():
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    tool = next(t for t in tools if t.name == "engra_list_members")
+    assert tool.inputSchema["properties"]["offset"]["default"] == 0
+    assert tool.inputSchema["properties"]["limit"]["default"] == 50

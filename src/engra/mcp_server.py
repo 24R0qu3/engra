@@ -72,7 +72,8 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "projects=null uses the active session; pass [] to search globally. "
                 "Response is an envelope {results, not_found, reason?}: not_found is "
                 "true (with a human-readable reason) when nothing matched or the best "
-                "result is below the confidence threshold."
+                "result is below the confidence threshold. Each result is pruned to "
+                "the fields useful for reading/citing/navigating a chunk."
             ),
             annotations=_annotations(readOnlyHint=True),
             inputSchema={
@@ -214,7 +215,11 @@ async def list_tools() -> list[mcp_types.Tool]:
         ),
         mcp_types.Tool(
             name="engra_list_files",
-            description="List all indexed files with chunk counts and staleness status.",
+            description=(
+                "List all indexed files with chunk counts and staleness status. "
+                "Paginated via offset/limit; response is an envelope "
+                "{items, total, offset, limit}."
+            ),
             annotations=_annotations(readOnlyHint=True),
             inputSchema={
                 "type": "object",
@@ -223,6 +228,16 @@ async def list_tools() -> list[mcp_types.Tool]:
                         "type": ["string", "null"],
                         "default": None,
                         "description": "Filter by project",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Number of items to skip",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 50,
+                        "description": "Max items to return",
                     },
                 },
             },
@@ -233,7 +248,9 @@ async def list_tools() -> list[mcp_types.Tool]:
                 "List all indexed sections for a file, grouped by section heading. "
                 "Use for structured browsing or absence-checking "
                 "(e.g. 'does class X have a callback for Y?') without a similarity query. "
-                "projects=null uses the active session; pass [] to search globally."
+                "projects=null uses the active session; pass [] to search globally. "
+                "Paginated via offset/limit; response is an envelope "
+                "{items, total, offset, limit}."
             ),
             annotations=_annotations(readOnlyHint=True),
             inputSchema={
@@ -261,6 +278,16 @@ async def list_tools() -> list[mcp_types.Tool]:
                             "Authoritative document id (from search results). "
                             "Disambiguates when the same filename exists in multiple projects."
                         ),
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "default": 0,
+                        "description": "Number of items to skip",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 50,
+                        "description": "Max items to return",
                     },
                 },
                 "required": ["filename"],
@@ -407,6 +434,47 @@ def _validate_index_paths(paths: list[Path]) -> None:
             raise ValueError(f"Path not permitted by MCP index allowlist: {p}")
 
 
+_LEAN_RESULT_FIELDS = (
+    "filename",
+    "doc_id",
+    "page",
+    "page_label",
+    "chunk",
+    "text",
+    "project",
+    "score",
+    "confidence",
+    "retrieval",
+    "breadcrumb",
+    "links_to",
+    "cross_references",
+    "notable",
+)
+
+
+def _lean_result(hit: dict) -> dict:
+    """Trim a full `_result_from_meta` dict to what an MCP client needs to read/cite/navigate.
+
+    Drops `source` (redundant with `doc_id`), `total_pages` (available via
+    `engra_info`/`engra_list_files`), `indexed_at`/`source_mtime` (staleness belongs to
+    `engra_list_files`), and `linked_from` (always empty today).
+    """
+    return {k: hit[k] for k in _LEAN_RESULT_FIELDS if k in hit}
+
+
+def _paginate(items: list, offset: int, limit: int) -> dict:
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset!r}")
+    if limit <= 0:
+        raise ValueError(f"limit must be > 0, got {limit!r}")
+    return {
+        "items": items[offset : offset + limit],
+        "total": len(items),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
 def _dispatch(name: str, args: dict):
     if name == "engra_search":
         results = _data_search(
@@ -427,13 +495,14 @@ def _dispatch(name: str, args: dict):
         if not results:
             return {"results": results, "not_found": True, "reason": "no matching chunks"}
         best_confidence = max(hit["confidence"] for hit in results)
+        lean_results = [_lean_result(hit) for hit in results]
         if best_confidence < DEFAULT_MIN_SCORE:
             return {
-                "results": results,
+                "results": lean_results,
                 "not_found": True,
                 "reason": "no results above confidence threshold",
             }
-        return {"results": results, "not_found": False}
+        return {"results": lean_results, "not_found": False}
     elif name == "engra_get_chunk":
         page = args["page"]
         return _data_get_chunks(
@@ -455,14 +524,16 @@ def _dispatch(name: str, args: dict):
     elif name == "engra_list_projects":
         return _data_list_projects()
     elif name == "engra_list_members":
-        return _data_list_members(
+        members = _data_list_members(
             filename=args["filename"],
             projects=args.get("projects"),
             section_filter=args.get("section_filter"),
             doc_id=args.get("doc_id"),
         )
+        return _paginate(members, args.get("offset", 0), args.get("limit", 50))
     elif name == "engra_list_files":
-        return _data_list_files(project=args.get("project"))
+        files = _data_list_files(project=args.get("project"))
+        return _paginate(files, args.get("offset", 0), args.get("limit", 50))
     elif name == "engra_index":
         index_paths = [Path(p) for p in args["paths"]]
         _validate_index_paths(index_paths)
