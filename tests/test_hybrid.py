@@ -9,6 +9,7 @@ from engra import storage
 from engra.commands import (
     _mmr_select,
     _reciprocal_rank_fusion,
+    _trim_by_confidence,
     _where_to_fts_sql,
 )
 
@@ -443,3 +444,40 @@ def test_ask_reads_rerank_from_config(monkeypatch):
 
     cmd.cmd_ask("question")
     assert captured.get("rerank") is False
+
+
+# ── _trim_by_confidence ──────────────────────────────────────────────────────
+
+
+def test_trim_by_confidence_screen_capture_motivating_example():
+    # Real observed confidences for "screen capture command" against ISO11783_6:
+    # a clean cliff between the 5 genuinely relevant hits and 3 unrelated ones.
+    confidences = [1.0, 0.9992, 0.9608, 0.3518, 0.3461, 0.0882, 0.0366, 0.0]
+    hits = [{"id": i, "confidence": c} for i, c in enumerate(confidences)]
+
+    trimmed = _trim_by_confidence(hits)
+
+    assert len(trimmed) == 5
+    assert [h["confidence"] for h in trimmed] == confidences[:5]
+
+
+def test_trim_by_confidence_partial_case_does_not_fully_clean():
+    # Real observed confidences for "identify VT message VT number": a genuine
+    # cliff exists, but it sits well above DEFAULT_MIN_SCORE (0.3), so the floor
+    # only trims the single item below it -- documenting the fix's known limit.
+    confidences = [1.0, 0.9628, 0.8372, 0.7953, 0.7349, 0.7256, 0.5907, 0.0]
+    hits = [{"confidence": c} for c in confidences]
+
+    trimmed = _trim_by_confidence(hits)
+
+    assert len(trimmed) == 7
+
+
+def test_trim_by_confidence_override_threshold():
+    hits = [{"confidence": c} for c in (0.9, 0.5, 0.1)]
+    assert len(_trim_by_confidence(hits, min_confidence=0.0)) == 3
+    assert len(_trim_by_confidence(hits, min_confidence=0.6)) == 1
+
+
+def test_trim_by_confidence_empty_list():
+    assert _trim_by_confidence([]) == []

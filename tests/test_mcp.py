@@ -745,7 +745,7 @@ def test_mcp_search_envelope_empty_is_not_found(monkeypatch):
 
 
 def test_mcp_search_envelope_low_confidence_is_not_found(monkeypatch):
-    """Results whose best confidence is below DEFAULT_MIN_SCORE are not_found."""
+    """Results whose confidence is below DEFAULT_MIN_SCORE are trimmed away entirely."""
     import asyncio
 
     import engra.commands as cmd
@@ -765,8 +765,28 @@ def test_mcp_search_envelope_low_confidence_is_not_found(monkeypatch):
     result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
     data = json.loads(result[0].text)
     assert data["not_found"] is True
-    assert len(data["results"]) == 2  # still returned, just flagged
+    assert data["results"] == []
     assert "confidence" in data["reason"]
+
+
+def test_mcp_search_envelope_trims_noise_keeps_confident_hits(monkeypatch):
+    """A response with a confidence cliff keeps only the hits above the floor."""
+    import asyncio
+
+    import engra.commands as cmd
+
+    confidences = [1.0, 0.9992, 0.9608, 0.3518, 0.3461, 0.0882, 0.0366, 0.0]
+
+    def fake_search(**kwargs):
+        return [{"text": f"hit{i}", "score": c, "confidence": c} for i, c in enumerate(confidences)]
+
+    monkeypatch.setattr(cmd, "_data_search", fake_search)
+
+    ms = _import_mcp_server()
+    result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q", "top": 8}))
+    data = json.loads(result[0].text)
+    assert data["not_found"] is False
+    assert len(data["results"]) == 5
 
 
 def test_mcp_search_schema_mentions_not_found():

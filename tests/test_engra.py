@@ -1041,6 +1041,56 @@ def test_ask_llm_connection_error(monkeypatch):
     assert "failed" in out.lower() or "LLM" in out
 
 
+def test_ask_drops_low_confidence_chunks_from_context(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    import engra.commands as commands
+
+    def fake_search(question, **kwargs):
+        return [
+            {
+                "filename": "doc.pdf",
+                "page": 1,
+                "page_label": "1",
+                "chunk": 0,
+                "text": "relevant",
+                "confidence": 1.0,
+                "score": 0.9,
+            },
+            {
+                "filename": "doc.pdf",
+                "page": 2,
+                "page_label": "2",
+                "chunk": 0,
+                "text": "noise",
+                "confidence": 0.05,
+                "score": 0.1,
+            },
+        ]
+
+    monkeypatch.setattr(commands, "_data_search", fake_search)
+    monkeypatch.setattr(commands, "get_collection", lambda: _make_ask_collection(["x"], [{}]))
+    monkeypatch.setattr(commands, "read_session", lambda: [])
+
+    captured = {}
+
+    def fake_ask_openai(ask_cfg, system_prompt, context_text, question):
+        captured["context_text"] = context_text
+        return True
+
+    monkeypatch.setattr(commands, "_ask_openai", fake_ask_openai)
+
+    buf = io.StringIO()
+    monkeypatch.setattr(commands, "console", Console(file=buf, highlight=False))
+
+    commands.cmd_ask("question")
+
+    assert "relevant" in captured["context_text"]
+    assert "noise" not in captured["context_text"]
+
+
 def test_ask_claude_backend_missing_anthropic(monkeypatch):
     import io
     import sys

@@ -68,3 +68,30 @@ def test_is_relevant_page_agnostic_when_null():
     record = {"expect_filename": "iso11783-5.pdf", "expect_page": None}
     assert run_eval.is_relevant({"filename": "iso11783-5.pdf", "page": 99}, record)
     assert not run_eval.is_relevant({"filename": "other.pdf", "page": 99}, record)
+
+
+def test_is_relevant_expect_pages_membership():
+    record = {"expect_filename": "doc.pdf", "expect_pages": [10, 20]}
+    assert run_eval.is_relevant({"filename": "doc.pdf", "page": 20}, record)
+    assert not run_eval.is_relevant({"filename": "doc.pdf", "page": 15}, record)
+    assert not run_eval.is_relevant({"filename": "other.pdf", "page": 20}, record)
+
+
+def test_precision_at_k_full_window():
+    assert run_eval.precision_at_k([True, True, False, True], 4) == 0.75
+
+
+def test_precision_at_k_short_window():
+    # only 2 results returned when k=5 requested -- denominator is the actual window
+    assert run_eval.precision_at_k([True, False], 5) == 0.5
+
+
+def test_precision_at_k_empty():
+    assert run_eval.precision_at_k([], 3) == 0.0
+
+
+def test_is_tight():
+    assert run_eval.is_tight({"expect_page": 5})
+    assert run_eval.is_tight({"expect_pages": [1, 2]})
+    assert not run_eval.is_tight({"expect_page": None})
+    assert not run_eval.is_tight({})

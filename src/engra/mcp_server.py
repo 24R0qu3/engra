@@ -38,6 +38,7 @@ from engra.commands import (
     _data_project_deactivate,
     _data_project_describe,
     _data_search,
+    _trim_by_confidence,
 )
 from engra.config import init as init_config
 from engra.config import load as load_config
@@ -490,20 +491,20 @@ def _dispatch(name: str, args: dict):
             mode=args.get("mode", "hybrid"),
         )
         # Wrap in a not_found envelope so an agent has a machine-readable signal for
-        # "the index doesn't have this" vs. "try another query". Confidence is
-        # relative to the returned set (never cross-query comparable), but reusing
-        # DEFAULT_MIN_SCORE as the floor gates responses whose best hit is weak even
-        # relative to its own peers.
+        # "the index doesn't have this" vs. "try another query". Trimming already
+        # drops every hit below DEFAULT_MIN_SCORE confidence, so "nothing survived
+        # the trim" IS the not-confident-enough case -- no separate whole-response
+        # max-confidence check is needed anymore.
         if not results:
             return {"results": results, "not_found": True, "reason": "no matching chunks"}
-        best_confidence = max(hit["confidence"] for hit in results)
-        lean_results = [_lean_result(hit) for hit in results]
-        if best_confidence < DEFAULT_MIN_SCORE:
+        trimmed = _trim_by_confidence(results)
+        if not trimmed:
             return {
-                "results": lean_results,
+                "results": [],
                 "not_found": True,
                 "reason": "no results above confidence threshold",
             }
+        lean_results = [_lean_result(hit) for hit in trimmed]
         return {"results": lean_results, "not_found": False}
     elif name == "engra_get_chunk":
         page = args["page"]

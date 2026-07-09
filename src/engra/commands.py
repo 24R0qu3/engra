@@ -166,6 +166,23 @@ def _normalize_scores(scores: list[float]) -> list[float]:
     return [(s - lo) / spread for s in scores]
 
 
+def _trim_by_confidence(hits: list[dict], min_confidence: float = DEFAULT_MIN_SCORE) -> list[dict]:
+    """Drop hits whose "confidence" (see _data_search) falls below min_confidence.
+
+    Confidence is min-max normalised over the SAME result set these hits came from
+    (see _normalize_scores) -- the strongest hit is ~1.0, so this is a floor over
+    each result's standing relative to its peers, not an absolute relevance score.
+    This is a PARTIAL fix for noise padding: it fully separates a clean confidence
+    cliff sitting near the floor, but a cliff sitting well above the floor (seen on
+    real queries during benchmarking) will still let some noise through. See the
+    eval harness (tests/eval/) for measured per-query before/after precision.
+    Order-preserving, does not mutate hits, and is NOT wired into _data_search's own
+    return value -- callers (mcp_server._dispatch, cmd_ask) opt in explicitly, so
+    cmd_search/CLI output is unaffected and keeps showing the full result set.
+    """
+    return [hit for hit in hits if hit.get("confidence", 1.0) >= min_confidence]
+
+
 AUTO_DESCRIBE_SAMPLE_CHUNKS = 5
 AUTO_DESCRIBE_MAX_CHARS = 4000
 
@@ -2182,6 +2199,7 @@ def cmd_ask(
         return
 
     hits = _data_search(question, top_k=top_k, projects=projects, filename=filename, rerank=rerank)
+    hits = _trim_by_confidence(hits)
 
     if not hits:
         console.print("[yellow]No relevant chunks found.[/yellow]")
