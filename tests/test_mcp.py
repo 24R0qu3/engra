@@ -1290,9 +1290,7 @@ def test_mcp_list_files_pagination(monkeypatch):
     monkeypatch.setattr(cmd, "_data_list_files", lambda **kwargs: items)
 
     ms = _import_mcp_server()
-    result = asyncio.run(
-        ms.server._call_tool_fn("engra_list_files", {"offset": 1, "limit": 2})
-    )
+    result = asyncio.run(ms.server._call_tool_fn("engra_list_files", {"offset": 1, "limit": 2}))
     data = json.loads(result[0].text)
 
     assert data["items"] == items[1:3]
