@@ -97,26 +97,29 @@ pipx inject engra mcp                  # add MCP server support
 pipx inject engra anthropic            # add Claude auto-description (needs ANTHROPIC_API_KEY)
 ```
 
-#### GPU setup (CUDA 12 — Linux)
+#### Full post-install setup (MCP, Claude, GPU)
 
-After installing with `[gpu]`, run once to install the full CUDA 12 onnxruntime wheel:
+Run once after `pipx install "engra[full,gpu]" --force` (or any subset) to finish setting up
+optional features:
 
 ```bash
 engra setup-gpu
 ```
 
-`fastembed-gpu` pulls in a lightweight add-on `onnxruntime-gpu` from PyPI that only provides
-the CUDA provider `.so` files. `engra setup-gpu` replaces it with the full standalone GPU wheel
-(252 MB) that includes Python bindings + CUDA 12 support.
+This installs the `mcp` and `anthropic` packages if missing, then (when a GPU install is
+detected) replaces the lightweight `onnxruntime-gpu` add-on `fastembed-gpu` pulls in — which only
+provides the CUDA provider `.so` files — with the full standalone GPU wheel (252 MB, Python
+bindings + CUDA 12 support).
 
-**Requirements:** CUDA 12.x and cuDNN 9 must be installed.
+**GPU requirements:** CUDA 12.x and cuDNN 9 must be installed.
 ```bash
 # Ubuntu / Debian (add NVIDIA repo first if needed)
 sudo apt install libcudnn9-cuda-12
 ```
 
-Re-run `engra setup-gpu` after every `pipx install "[gpu]" --force` (pipx reinstall resets the wheel).
-You can also set `provider = "cuda"` in `~/.config/engra/config.toml` under `[embedding]`.
+Re-run `engra setup-gpu` after every `pipx install "[full,gpu]" --force` (pipx reinstall resets
+the wheel). Set `provider = "cuda"` and `device_id` (for multi-GPU systems) in
+`~/.config/engra/config.toml` under `[embedding]`.
 
 ---
 
@@ -171,6 +174,12 @@ engra index --check                           # report stale or missing source f
 engra index ./docs/ --profile                 # show per-phase timing breakdown after indexing
 ```
 
+> **Upgrading from an older engra version:** the keyword (BM25) index and token-aware chunk
+> sizing only apply to newly indexed content. Documents indexed before this upgrade still work
+> (dense/vector search is unaffected), but won't be found by `--mode keyword`/`hybrid`
+> exact-token matches, and may have larger, character-sized chunks. Run `engra index --force`
+> on existing projects to rebuild them under the current chunking and keyword index.
+
 ## Searching
 
 ```bash
@@ -180,7 +189,15 @@ engra search "query" --min-score 0.4          # filter low-quality matches
 engra search "query" --file report.pdf        # restrict to one file
 engra search "query" --project iso-std        # restrict to a project (overrides session)
 engra search "query" --all                    # global search, ignore active session
+engra search "PGN 60928" --mode keyword       # exact-token match via BM25 (part/error codes, symbols)
+engra search "query" --mode dense             # vector similarity only
+engra search "query" --rerank                 # re-score with a cross-encoder (pip install 'engra[rerank]')
 ```
+
+By default `search` runs `--mode hybrid`: dense (vector) and keyword (BM25) retrieval are
+fused via Reciprocal Rank Fusion, so exact-token queries (part numbers, error/PGN codes, API
+symbol names) that pure vector search misses are still found. Results also carry a MMR-diversified
+selection by default, trading a little relevance for topical spread across the returned chunks.
 
 ## Projects
 
@@ -255,14 +272,22 @@ engra ask "query" --chunks 10               # use more context chunks
 engra ask "query" --all                     # global context, ignore active session
 ```
 
+Retrieved context is reranked by default (`ask.rerank`) and capped by `ask.max_context_chars`
+(lowest-ranked chunks are dropped first) so a large `--chunks` value can't overflow the target
+model's context window.
+
 Configure the LLM endpoint in `~/.config/engra/config.toml`:
 
 ```toml
 [ask]
-api_base = "http://localhost:11434/v1"   # Ollama default
+backend = "openai"                       # "openai" (any OpenAI-compat endpoint) | "claude"
+api_base = "http://localhost:11434/v1"   # Ollama default (backend = "openai")
 model = "llama3"
 api_key = "ollama"
+# claude_model = "claude-haiku-4-5-20251001"   # used when backend = "claude" (needs engra[ai] + ANTHROPIC_API_KEY)
 context_chunks = 5
+max_context_chars = 12000
+rerank = true
 ```
 
 ## Export and import
@@ -314,6 +339,19 @@ claude mcp add --scope user engra -- engra mcp
 
 Alternatively, add the snippet above manually to `.claude/settings.json` (or run `engra mcp --print-config` and follow the prompt).
 
+**Tool notes:**
+- `engra_search` runs hybrid dense+BM25 retrieval and reranks by default; the response is an
+  envelope `{results, not_found, reason?}` — `not_found` is `true` (with a reason) when nothing
+  matched or the best hit is below the confidence threshold, so an agent can distinguish "not in
+  the index" from "try another query." Each result carries a `confidence` (0–1, normalized
+  *within that response*, not comparable across queries) alongside the raw `score`.
+- `engra_list_files` and `engra_list_members` are paginated (`offset`/`limit`, default `limit=50`);
+  the response is `{items, total, offset, limit}`.
+- `engra_get_chunk`, `engra_get_neighbors`, and `engra_list_members` accept an optional `doc_id`
+  (from a search result) to disambiguate when the same filename exists in more than one project.
+- `engra_index` only accepts paths under the `[mcp] index_allowlist` config (default: your home
+  directory).
+
 ## Listing and removing documents
 
 ```bash
@@ -352,11 +390,14 @@ type = "local"
 copy = true   # set to false to symlink instead of copying files
 
 [ask]
-# OpenAI-compatible endpoint used by `engra ask` (default: local Ollama)
+backend = "openai"                       # "openai" (any OpenAI-compat endpoint) | "claude"
 api_base = "http://localhost:11434/v1"
 model = "llama3"
 api_key = "ollama"
+# claude_model = "claude-haiku-4-5-20251001"   # used when backend = "claude"
 context_chunks = 5
+max_context_chars = 12000                # safety cap on total context sent to the LLM
+rerank = true                            # re-score retrieved context with a cross-encoder
 
 [autodescribe]
 # Generates description + keywords when indexing new projects
@@ -366,6 +407,16 @@ api_base = "http://localhost:11434/v1"
 model = "llama3"
 api_key = "ollama"
 # claude_model = "claude-haiku-4-5-20251001"   # used when backend = "claude"
+
+[embedding]
+batch_size = 64
+threads = 0        # 0 = auto (os.cpu_count())
+provider = "cpu"    # "cpu" | "cuda" | "rocm" | "directml"
+device_id = 0       # GPU device index; increase for multi-GPU systems
+max_tokens = 450     # target chunk size in tokens (the model truncates input at 512)
+
+[mcp]
+index_allowlist = []   # paths engra_index (MCP tool) may index; empty = your home directory
 ```
 
 ## GPU support
