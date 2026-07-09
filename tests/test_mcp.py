@@ -623,7 +623,11 @@ def test_mcp_list_files_dispatch(monkeypatch):
     ms = _import_mcp_server()
     results = asyncio.run(ms.server._call_tool_fn("engra_list_files", {}))
     data = json.loads(results[0].text)
-    assert isinstance(data, list)
+    assert isinstance(data, dict)
+    assert isinstance(data["items"], list)
+    assert data["total"] == len(data["items"])
+    assert data["offset"] == 0
+    assert data["limit"] == 50
 
 
 def test_mcp_info_dispatch(monkeypatch):
@@ -797,7 +801,9 @@ def test_mcp_list_members_dispatch(monkeypatch):
     ms = _import_mcp_server()
     results = asyncio.run(ms.server._call_tool_fn("engra_list_members", {"filename": "doc.pdf"}))
     data = json.loads(results[0].text)
-    assert isinstance(data, list)
+    assert isinstance(data, dict)
+    assert isinstance(data["items"], list)
+    assert data["total"] == len(data["items"])
 
 
 def test_mcp_list_members_passes_section_filter(monkeypatch):
@@ -1207,3 +1213,129 @@ def test_mcp_get_chunk_passes_doc_id(monkeypatch):
         )
     )
     assert captured.get("doc_id") == "report.pdf_aaaaaaaa"
+
+
+# ── engra_search lean payload ─────────────────────────────────────────────────
+
+_FULL_RESULT = {
+    "filename": "doc.pdf",
+    "doc_id": "doc.pdf_deadbeef",
+    "page": 1,
+    "page_label": "1",
+    "total_pages": 42,
+    "chunk": 0,
+    "score": 0.9,
+    "text": "some text",
+    "project": "proj_a",
+    "source": "/tmp/doc.pdf",
+    "indexed_at": "2026-01-01T00:00:00",
+    "source_mtime": 123456.0,
+    "notable": False,
+    "links_to": "",
+    "linked_from": [],
+    "breadcrumb": "NS > MyClass",
+    "cross_references": [],
+    "retrieval": "dense",
+    "confidence": 1.0,
+}
+
+_LEAN_KEEP_FIELDS = (
+    "filename",
+    "doc_id",
+    "page",
+    "page_label",
+    "chunk",
+    "text",
+    "project",
+    "score",
+    "confidence",
+    "retrieval",
+    "breadcrumb",
+    "links_to",
+    "cross_references",
+    "notable",
+)
+
+_LEAN_DROP_FIELDS = ("source", "total_pages", "indexed_at", "source_mtime", "linked_from")
+
+
+def test_mcp_search_results_are_lean(monkeypatch):
+    """engra_search results keep only fields an agent needs; drop internal metadata."""
+    import asyncio
+
+    import engra.commands as cmd
+
+    monkeypatch.setattr(cmd, "_data_search", lambda **kwargs: [dict(_FULL_RESULT)])
+
+    ms = _import_mcp_server()
+    result = asyncio.run(ms.server._call_tool_fn("engra_search", {"query": "q"}))
+    data = json.loads(result[0].text)
+
+    hit = data["results"][0]
+    for field in _LEAN_KEEP_FIELDS:
+        assert field in hit, field
+    for field in _LEAN_DROP_FIELDS:
+        assert field not in hit, field
+
+
+# ── engra_list_files / engra_list_members pagination ─────────────────────────
+
+
+def test_mcp_list_files_pagination(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    items = [{"filename": f"f{i}.pdf"} for i in range(5)]
+    monkeypatch.setattr(cmd, "_data_list_files", lambda **kwargs: items)
+
+    ms = _import_mcp_server()
+    result = asyncio.run(ms.server._call_tool_fn("engra_list_files", {"offset": 1, "limit": 2}))
+    data = json.loads(result[0].text)
+
+    assert data["items"] == items[1:3]
+    assert data["total"] == 5
+    assert data["offset"] == 1
+    assert data["limit"] == 2
+
+
+def test_mcp_list_members_pagination(monkeypatch):
+    import asyncio
+
+    import engra.commands as cmd
+
+    items = [{"section": f"s{i}"} for i in range(5)]
+    monkeypatch.setattr(cmd, "_data_list_members", lambda **kwargs: items)
+
+    ms = _import_mcp_server()
+    result = asyncio.run(
+        ms.server._call_tool_fn(
+            "engra_list_members", {"filename": "doc.pdf", "offset": 1, "limit": 2}
+        )
+    )
+    data = json.loads(result[0].text)
+
+    assert data["items"] == items[1:3]
+    assert data["total"] == 5
+    assert data["offset"] == 1
+    assert data["limit"] == 2
+
+
+def test_mcp_list_files_schema_exposes_pagination():
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    tool = next(t for t in tools if t.name == "engra_list_files")
+    assert "offset" in tool.inputSchema["properties"]
+    assert "limit" in tool.inputSchema["properties"]
+
+
+def test_mcp_list_members_schema_exposes_pagination():
+    import asyncio
+
+    ms = _import_mcp_server()
+    tools = asyncio.run(ms.server._list_tools_fn())
+    tool = next(t for t in tools if t.name == "engra_list_members")
+    assert "offset" in tool.inputSchema["properties"]
+    assert "limit" in tool.inputSchema["properties"]
