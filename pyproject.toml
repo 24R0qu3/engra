@@ -8,7 +8,7 @@ dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
     "pymupdf",
-    "chromadb",
+    "chromadb==1.5.7",  # exact pin: chromadb's persistent store format is not guaranteed compatible across even patch versions, and engra's design assumes one on-disk DB shared across independently-installed environments (dev venv, pipx, binary) -- a version drift between them can make one install's writes unreadable by another (observed: 1.5.7 writer, 1.5.9 reader -> "Error finding id")
     "fastembed>=0.8.0,<0.9.0",  # 0.8.x: mean pooling for multilingual-e5-large; pin to avoid silent embedding drift
     "rich",
     "platformdirs",
